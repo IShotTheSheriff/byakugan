@@ -1,0 +1,6 @@
+{
+  "name": "web",
+  "private": true,
+  "scripts": { "build": "next build" },
+  "dependencies": { "@acme/ui": "*", "lodash": "4.17.21", "next": "15.0.0", "react": "19.0.0" }
+}

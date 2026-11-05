@@ -1,0 +1,5 @@
+{
+  "name": "basic-app",
+  "private": true,
+  "dependencies": { "lodash": "4.17.21", "es-utils": "1.0.0", "react": "19.0.0" }
+}

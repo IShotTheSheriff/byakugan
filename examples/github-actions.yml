@@ -1,0 +1,53 @@
+# Build and deploy apps/web only when a change reaches it.
+#
+# Pull requests compare with main in git mode: fast, no artifacts needed,
+# dependency updates count per package.
+# Pushes to main save a manifest, so pull requests can also compare exactly,
+# down to single files inside node_modules.
+name: web
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # affected --base needs the merge base
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # On pull requests: does anything web uses differ from main?
+      - id: changes
+        if: github.event_name == 'pull_request'
+        run: npx byakugan affected -C apps/web --base origin/${{ github.base_ref }}
+
+      # Reuse .next when every fragment web uses is unchanged, dependencies included.
+      - id: fingerprint
+        run: npx byakugan hash -C apps/web --manifest .byakugan/web.json
+
+      - id: build-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/web/.next
+          key: web-next-${{ steps.fingerprint.outputs.fingerprint }}
+
+      - if: >-
+          steps.build-cache.outputs.cache-hit != 'true' &&
+          (github.event_name == 'push' || steps.changes.outputs.affected == 'true')
+        run: npm run build --workspace web
+
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: byakugan-web-${{ github.sha }}
+          path: .byakugan/web.json

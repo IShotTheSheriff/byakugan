@@ -1,0 +1,6 @@
+node_modules/
+!test/fixtures/**/node_modules/
+/dist/
+.byakugan/
+*.log
+.DS_Store
