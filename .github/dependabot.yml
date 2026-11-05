@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Bumps the pinned action SHAs in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

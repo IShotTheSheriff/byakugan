@@ -47,7 +47,7 @@ packages/ui/src/Button.tsx#Button
 npm install --save-dev byakugan-cli
 ```
 
-The command is `byakugan`. It needs Node.js 20.19 or newer. CI runs on 22 and 24.
+The command is `byakugan`. It needs Node.js 22.12 or newer. CI runs on 22, 24 and 26.
 The programmatic API ships types for TypeScript 5 or newer, with `@types/node`.
 
 The npm package is `byakugan-cli`, and an unrelated package named `byakugan`
