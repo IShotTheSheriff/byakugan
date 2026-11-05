@@ -1,8 +1,9 @@
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { isBuiltin } from 'node:module';
-import { basename, dirname, extname, join, relative, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ResolverFactory, type NapiResolveOptions } from 'oxc-resolver';
-import picomatch from 'picomatch';
+import { readText } from './fs.ts';
+import { globMatcher } from './glob.ts';
 
 export interface PackageInfo {
   name: string;
@@ -20,6 +21,13 @@ export interface ResolverOptions {
   conditions?: string[];
   /** Also resolve with the `react-server` condition (Next.js App Router). */
   reactServer?: boolean;
+  /**
+   * Edge runtimes to resolve for, each with its own condition set: `edge-light` (Next.js
+   * middleware and edge routes) and `workerd` (Cloudflare Workers).
+   */
+  edge?: Array<'edge-light' | 'workerd'>;
+  /** tsconfig.json or jsconfig.json to read `paths` from. Default: the nearest tsconfig.json of each file. */
+  tsconfig?: string;
   modularizeImports?: Record<string, ModularizeRule>;
 }
 
@@ -40,18 +48,13 @@ const EXTENSION_ALIAS = {
 export const isInNodeModules = (file: string) => file.includes(`${sep}node_modules${sep}`);
 
 /** Modules the runtime or bundler provides: `bun:sqlite`, `cloudflare:workers`, `virtual:pwa-register`. */
-const PROVIDED = /^(bun|cloudflare|workerd|virtual):|^__STATIC_CONTENT_MANIFEST$/;
+const PROVIDED = /^(bun|cloudflare|workerd|virtual|astro):|^bun$|^__STATIC_CONTENT_MANIFEST$/;
 
 const STYLE_SUFFIXES = ['.scss', '.sass', '.css', '.less'];
 
 /** The file a stylesheet reference points at: exact, with an extension, a Sass partial, or an index. */
-export const findStyleFile = (base: string): string | undefined => {
-  const name = basename(base);
-  const candidates = [
-    base,
-    ...STYLE_SUFFIXES.flatMap(e => [`${base}${e}`, join(dirname(base), `_${name}${e}`), join(base, `_index${e}`), join(base, `index${e}`)]),
-  ];
-  return candidates.find(c => {
+export const findStyleFile = (base: string): string | undefined =>
+  styleCandidates(base).find(c => {
     if (extname(c) === '') return false;
     try {
       return statSync(c).isFile();
@@ -59,9 +62,17 @@ export const findStyleFile = (base: string): string | undefined => {
       return false;
     }
   });
+
+/** Every path `findStyleFile` tries for `base`, in order. */
+export const styleCandidates = (base: string): string[] => {
+  const name = basename(base);
+  return [
+    base,
+    ...STYLE_SUFFIXES.flatMap(e => [`${base}${e}`, join(dirname(base), `_${name}${e}`), join(base, `_index${e}`), join(base, `index${e}`)]),
+  ].filter(c => extname(c) !== '');
 };
 
-const packageNameOf = (specifier: string) => {
+export const packageNameOf = (specifier: string) => {
   const parts = specifier.split('/');
   return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
 };
@@ -95,14 +106,26 @@ export class Resolver {
       mainFields: ['module', 'main'],
       symlinks: true,
     };
-    const sets = [
-      [...extra, 'browser', 'import', 'module', 'require', 'default'],
-      [...extra, 'node', 'import', 'module', 'require', 'default'],
+    // A package's `exports` picks the first key, in its own order, that the set contains. So
+    // `import` and `require` sit in separate sets: with both in one, `{ "require": ..., "import": ... }`
+    // resolves an ES import to the CommonJS build.
+    const sets: Array<{ conditions: string[]; browser?: boolean }> = [
+      { conditions: [...extra, 'browser', 'import', 'module', 'default'], browser: true },
+      { conditions: [...extra, 'node', 'import', 'module', 'default'] },
+      { conditions: [...extra, 'node', 'require', 'default'] },
     ];
-    if (options.reactServer) sets.push([...extra, 'react-server', 'node', 'import', 'module', 'require', 'default']);
-    const first = new ResolverFactory({ ...base, tsconfig: 'auto', conditionNames: sets[0] });
-    this.projectResolvers = [first, ...sets.slice(1).map(c => first.cloneWithOptions({ ...base, tsconfig: 'auto', conditionNames: c }))];
-    this.packageResolvers = sets.map(c => first.cloneWithOptions({ ...base, conditionNames: c }));
+    if (options.reactServer) sets.push({ conditions: [...extra, 'react-server', 'node', 'import', 'module', 'default'] });
+    // One set per runtime: a package listing `edge-light` before `workerd` would otherwise hide the Workers build.
+    for (const runtime of options.edge ?? []) sets.push({ conditions: [...extra, runtime, 'worker', 'browser', 'import', 'module', 'default'], browser: true });
+    const optionsFor = (set: (typeof sets)[number]): NapiResolveOptions => ({
+      ...base,
+      conditionNames: set.conditions,
+      ...(set.browser ? { mainFields: ['browser', 'module', 'main'], aliasFields: [['browser']] } : {}),
+    });
+    const tsconfig: NapiResolveOptions['tsconfig'] = options.tsconfig ? { configFile: options.tsconfig, references: 'auto' } : 'auto';
+    const first = new ResolverFactory({ ...optionsFor(sets[0]), tsconfig });
+    this.projectResolvers = [first, ...sets.slice(1).map(s => first.cloneWithOptions({ ...optionsFor(s), tsconfig }))];
+    this.packageResolvers = sets.map(s => first.cloneWithOptions(optionsFor(s)));
     const style: NapiResolveOptions = {
       extensions: ['.css', '.scss', '.sass', '.less'],
       mainFields: ['style', 'sass', 'main'],
@@ -110,21 +133,78 @@ export class Resolver {
       conditionNames: [...extra, 'style', 'sass', 'import', 'require', 'default'],
       symlinks: true,
     };
-    this.styleResolvers = [first.cloneWithOptions({ ...style, tsconfig: 'auto' }), first.cloneWithOptions(style)];
+    this.styleResolvers = [first.cloneWithOptions({ ...style, tsconfig }), first.cloneWithOptions(style)];
     this.modularize = { ...DEFAULT_MODULARIZE, ...options.modularizeImports };
+  }
+
+  private checked = new Set<string>();
+  private installed = new Map<string, boolean>();
+
+  /** Throws when `dir` holds a package.json that is not a regular file. */
+  private checkManifest(dir: string) {
+    if (this.checked.has(dir)) return;
+    this.checked.add(dir);
+    const file = join(dir, 'package.json');
+    let regular = true;
+    try {
+      regular = statSync(file).isFile();
+    } catch {}
+    if (!regular) throw new Error(`${file} is not a regular file`);
+  }
+
+  /** `checkManifest` for `dir` and every directory above it. */
+  private checkManifests(dir: string) {
+    for (let current = dir; !this.checked.has(current); current = dirname(current)) {
+      this.checkManifest(current);
+      if (dirname(current) === current) return;
+    }
+  }
+
+  /**
+   * oxc-resolver reads every package.json on the way, and a FIFO there would block it forever.
+   * The directories it is about to look in are checked first. Committed links are checked in
+   * loadProject, which also covers paths an alias leads to.
+   */
+  private checkLookup(specifier: string, fromFile: string) {
+    this.checkManifests(dirname(fromFile));
+    if (specifier.startsWith('.') || isAbsolute(specifier)) {
+      this.checkManifests(resolve(dirname(fromFile), specifier));
+      return;
+    }
+    const name = packageNameOf(specifier);
+    for (let dir = dirname(fromFile); ; dir = dirname(dir)) {
+      const pkg = join(dir, 'node_modules', name);
+      let found = this.installed.get(pkg);
+      if (found === undefined) {
+        found = existsSync(pkg);
+        this.installed.set(pkg, found);
+      }
+      // The directories above the package are the importer's own, checked already.
+      if (found) for (let current = join(dir, 'node_modules', specifier); ; current = dirname(current)) {
+        this.checkManifest(current);
+        if (current === pkg || dirname(current) === current) break;
+      }
+      if (dirname(dir) === dir) return;
+    }
   }
 
   /** All files `specifier` can point at from `fromFile`, across export conditions. Empty when unresolved. */
   resolve(specifier: string, fromFile: string): string[] {
     if (this.isBuiltin(specifier)) return [];
+    // Vite `./app.css?url`: the query picks a loader, the file is the same.
+    const query = specifier.indexOf('?');
+    if (query > 0) specifier = specifier.slice(0, query);
     const relativeSpecifier = specifier.startsWith('.') || specifier.startsWith('/');
     const external = isInNodeModules(fromFile);
     const cacheKey = `${dirname(fromFile)}\0${specifier}`;
     const cached = this.cache.get(cacheKey);
     if (cached) return cached;
+    this.checkLookup(specifier, fromFile);
     const resolvers = external ? this.packageResolvers : this.projectResolvers;
     const found = new Set<string>();
-    for (const resolver of relativeSpecifier ? resolvers.slice(0, 1) : resolvers) {
+    // A relative path can still differ per set: the `browser` field remaps files, in packages and
+    // in workspace packages alike. The server build keeps the original file.
+    for (const resolver of relativeSpecifier ? resolvers.slice(0, 2) : resolvers) {
       const result = external ? resolver.sync(dirname(fromFile), specifier) : resolver.resolveFileSync(fromFile, specifier);
       if (result.path) found.add(result.path);
     }
@@ -138,6 +218,7 @@ export class Resolver {
    * the package can be found, `package` names it so its version can stand in for the file.
    */
   resolveStyle(specifier: string, fromFile: string): { file?: string; package?: string } {
+    this.checkLookup(specifier, fromFile);
     const external = isInNodeModules(fromFile);
     const resolver = this.styleResolvers[external ? 1 : 0];
     const result = external ? resolver.sync(dirname(fromFile), specifier) : resolver.resolveFileSync(fromFile, specifier);
@@ -197,7 +278,7 @@ export class Resolver {
       const patterns = pkg.sideEffects
         .filter((p): p is string => typeof p === 'string')
         .map(p => (p.startsWith('./') ? p.slice(2) : p.includes('/') ? p : `**/${p}`));
-      matcher = picomatch(patterns, { dot: true });
+      matcher = globMatcher(patterns, { dot: true });
       this.sideEffectMatchers.set(pkg.dir, matcher);
     }
     return !matcher(relative(pkg.dir, file).split(sep).join('/'));
@@ -211,12 +292,8 @@ export class Resolver {
 }
 
 const readPackage = (dir: string): PackageInfo | undefined => {
-  let text: string;
-  try {
-    text = readFileSync(join(dir, 'package.json'), 'utf8');
-  } catch {
-    return;
-  }
+  const text = readText(join(dir, 'package.json'));
+  if (text === undefined) return;
   try {
     const json = JSON.parse(text) as Record<string, unknown>;
     if (typeof json.name !== 'string') return;

@@ -40,6 +40,14 @@ export interface GraphSummary {
   stats: { projectFiles: number; packageFiles: number; packages: number; liveFragments: number };
 }
 
+/**
+ * File names and specifiers come from the repository. Escape control characters so a
+ * name holding ESC sequences cannot rewrite the terminal or a CI log.
+ */
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
+export const safe = (text: string) => text.replace(CONTROL, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+const lines = (out: string[]) => out.map(line => safe(line.replace(/[\r\n]/g, ' '))).join('\n');
+
 const byKey = <T extends { key: string }>(a: T, b: T) => a.key.localeCompare(b.key);
 
 export const summarize = (graph: UsageGraph): GraphSummary => {
@@ -167,7 +175,7 @@ export const formatGraph = (summary: GraphSummary): string => {
     out.push('', 'warnings');
     for (const w of summary.warnings) out.push(`  ${w}`);
   }
-  return out.join('\n');
+  return lines(out);
 };
 
 /** One line per graph node: `app/page.tsx (entry)`, `lib/utils.ts#cn`, `npm:lodash/partition.js (runs)`. */
@@ -249,23 +257,30 @@ const collapsedEdges = (graph: UsageGraph): { nodes: Map<string, 'file' | 'packa
 
 const edgeLabel = (names: Set<string>) => list([...names].map(n => (n === '*' ? 'all' : n)).sort(), 3);
 
+/** Mermaid strings: entity codes for quotes and backticks, no line breaks (a new line could start a `click` directive). */
+const mermaidText = (text: string) =>
+  text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/#/g, '#35;').replace(/"/g, '#quot;').replace(/`/g, '#96;').replace(/</g, '#lt;').replace(/>/g, '#gt;');
+
 export const formatMermaid = (graph: UsageGraph): string => {
   const { nodes, edges } = collapsedEdges(graph);
   const ids = new Map<string, string>();
   const out = ['graph LR'];
   for (const [key, kind] of nodes) {
     const id = toId(key, ids);
-    out.push(kind === 'package' ? `  ${id}[["${key}"]]` : `  ${id}["${key}"]`);
+    const label = mermaidText(key);
+    out.push(kind === 'package' ? `  ${id}[["${label}"]]` : `  ${id}["${label}"]`);
   }
-  for (const e of edges) out.push(`  ${toId(e.from, ids)} -->|"${edgeLabel(e.names)}"| ${toId(e.to, ids)}`);
+  for (const e of edges) out.push(`  ${toId(e.from, ids)} -->|"${mermaidText(edgeLabel(e.names))}"| ${toId(e.to, ids)}`);
   return out.join('\n');
 };
+
+const dotText = (text: string) => text.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
 
 export const formatDot = (graph: UsageGraph): string => {
   const { nodes, edges } = collapsedEdges(graph);
   const out = ['digraph byakugan {', '  rankdir=LR;', '  node [shape=box, fontname="Helvetica"];'];
-  for (const [key, kind] of nodes) out.push(`  "${key}"${kind === 'package' ? ' [shape=component]' : ''};`);
-  for (const e of edges) out.push(`  "${e.from}" -> "${e.to}" [label="${edgeLabel(e.names)}"];`);
+  for (const [key, kind] of nodes) out.push(`  "${dotText(key)}"${kind === 'package' ? ' [shape=component]' : ''};`);
+  for (const e of edges) out.push(`  "${dotText(e.from)}" -> "${dotText(e.to)}" [label="${dotText(edgeLabel(e.names))}"];`);
   out.push('}');
   return out.join('\n');
 };
@@ -283,7 +298,8 @@ export const formatAffected = (graph: UsageGraph, result: AffectedResult, verbos
   const shown = verbose ? result.reasons : result.reasons.slice(0, 20);
   for (const r of shown) {
     out.push('', `${r.kind}: ${r.key} ${r.detail}`);
-    if (r.chain.length > 0) out.push(...formatChain(graph, r.chain, '    '));
+    // A loop, not a spread: chains can be hundreds of thousands of steps long.
+    if (r.chain.length > 0) for (const line of formatChain(graph, r.chain, '    ')) out.push(line);
   }
   if (shown.length < result.reasons.length) out.push('', `… ${result.reasons.length - shown.length} more (use --verbose)`);
   if (result.ignored.length > 0) {
@@ -293,7 +309,11 @@ export const formatAffected = (graph: UsageGraph, result: AffectedResult, verbos
     }
     if (!verbose && result.ignored.length > 20) out.push(`  … ${result.ignored.length - 20} more`);
   }
-  return out.join('\n');
+  if (result.warnings.length > 0) {
+    out.push('', 'warnings');
+    for (const w of result.warnings) out.push(`  ${w}`);
+  }
+  return lines(out);
 };
 
 export interface WhyMatch {
@@ -339,15 +359,15 @@ export const why = (graph: UsageGraph, query: string, cwd = process.cwd(), limit
 
 export const formatWhy = (graph: UsageGraph, result: WhyResult): string => {
   if (result.matches.length === 0) {
-    return result.loaded
-      ? `${result.query}: loaded (for example through a barrel), but none of its code is used`
-      : `${result.query}: not used by the app`;
+    return lines([
+      result.loaded ? `${result.query}: loaded (for example through a barrel), but none of its code is used` : `${result.query}: not used by the app`,
+    ]);
   }
   const out: string[] = [];
   for (const m of result.matches) {
     if (out.length > 0) out.push('');
     out.push(`${m.key}`);
-    out.push(...formatChain(graph, m.chain, '  '));
+    for (const line of formatChain(graph, m.chain, '  ')) out.push(line);
   }
-  return out.join('\n');
+  return lines(out);
 };

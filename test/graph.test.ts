@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { analyze } from '../src/index.ts';
-import { edit, fingerprintOf, fixture, liveKeys } from './helpers.ts';
+import { edit, fingerprintOf, fixture, liveKeys, write } from './helpers.ts';
 
 describe('used graph', () => {
   const dir = fixture('basic');
@@ -79,7 +79,6 @@ describe('fingerprint', () => {
     ['displayName of an unused component', 'src/components/Modal.tsx', s => s.replace("'Modal'", "'Dialog'"), false],
     ['displayName of a used component', 'src/components/Button.tsx', s => s.replace("'Button'", "'Btn'"), true],
     ['a side effect in a module the barrel loads', 'src/components/Modal.tsx', s => `${s}\nconsole.log('loaded');\n`, true],
-    ['a dependency range in package.json', 'package.json', s => s.replace('"lodash": "4.17.21"', '"lodash": "^4.17.21"'), false],
     ['a script in package.json', 'package.json', s => s.replace('"private": true', '"private": true,\n  "scripts": { "build": "next build" }'), true],
     ['tsconfig.json', 'tsconfig.json', s => s.replace('react-jsx', 'preserve'), true],
   ];
@@ -92,6 +91,22 @@ describe('fingerprint', () => {
       assert.equal(fingerprintOf(dir) !== before, affected);
     });
   }
+
+  // The lockfile pins what installs. Without one, a range edit can install another version, and git mode would not see it.
+  test('stays the same when editing a dependency range in package.json next to a lockfile', () => {
+    const dir = fixture('basic');
+    write(dir, 'package-lock.json', '{ "lockfileVersion": 3, "packages": {} }\n');
+    const before = fingerprintOf(dir);
+    edit(dir, 'package.json', s => s.replace('"lodash": "4.17.21"', '"lodash": "^4.17.21"'));
+    assert.equal(fingerprintOf(dir), before);
+  });
+
+  test('changes when editing a dependency range in package.json without a lockfile', () => {
+    const dir = fixture('basic');
+    const before = fingerprintOf(dir);
+    edit(dir, 'package.json', s => s.replace('"lodash": "4.17.21"', '"lodash": "^4.17.21"'));
+    assert.notEqual(fingerprintOf(dir), before);
+  });
 
   test('is stable across copies of the same project', () => {
     assert.equal(fingerprintOf(fixture('basic')), fingerprintOf(fixture('basic')));

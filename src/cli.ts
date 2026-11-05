@@ -3,8 +3,8 @@ import { dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import { affectedSinceCommit, affectedSinceManifest, createManifest, readManifest } from './affected.ts';
 import { UsageGraph } from './graph.ts';
-import { loadProject } from './project.ts';
-import { formatAffected, formatDot, formatGraph, formatMermaid, formatWhy, summarize, why } from './report.ts';
+import { isConfigEntry, loadProject } from './project.ts';
+import { formatAffected, formatDot, formatGraph, formatMermaid, formatWhy, safe, summarize, why } from './report.ts';
 
 const HELP = `byakugan: the graph of code your app actually uses
 
@@ -39,6 +39,11 @@ const githubOutput = (values: Record<string, string>) => {
   const file = process.env.GITHUB_OUTPUT;
   if (!file) return;
   appendFileSync(file, Object.entries(values).map(([k, v]) => `${k}=${v}\n`).join(''));
+};
+
+/** Warnings go to stderr, so stdout stays a fingerprint or JSON that scripts can read. */
+const warn = (warnings: string[]) => {
+  for (const w of warnings) console.error(`byakugan: warning: ${safe(w.replace(/[\r\n]/g, ' '))}`);
 };
 
 const main = (argv: string[]): number => {
@@ -84,8 +89,10 @@ const main = (argv: string[]): number => {
   }
 
   const project = loadProject({ cwd: values.cwd });
-  if (project.entries.length === 0) {
-    console.error(`No entry files found in ${project.dir}. Add "entry" globs to byakugan.json.`);
+  // Only config files (vite.config.ts, next.config.js) means the app's own entries were not found:
+  // a fingerprint of the config alone would miss every source change.
+  if (project.entries.every(isConfigEntry)) {
+    console.error(`No entry files found in ${safe(project.dir)}. Add "entry" globs to byakugan.json.`);
     return 2;
   }
   const graph = new UsageGraph(project).build();
@@ -105,13 +112,21 @@ const main = (argv: string[]): number => {
       writeFileSync(values.manifest, `${JSON.stringify(createManifest(graph), null, 2)}\n`);
     }
     githubOutput({ fingerprint });
-    console.log(values.json ? JSON.stringify({ fingerprint, fragments: graph.live.size }) : fingerprint);
+    if (values.json) console.log(JSON.stringify({ fingerprint, fragments: graph.live.size, warnings: graph.warnings }));
+    else {
+      warn(graph.warnings);
+      console.log(fingerprint);
+    }
     return 0;
   }
 
   if (command === 'why') {
     const result = why(graph, target);
-    console.log(values.json ? JSON.stringify(result, null, 2) : formatWhy(graph, result));
+    if (values.json) console.log(JSON.stringify({ ...result, warnings: graph.warnings }, null, 2));
+    else {
+      warn(graph.warnings);
+      console.log(formatWhy(graph, result));
+    }
     return 0;
   }
 
@@ -126,6 +141,7 @@ const main = (argv: string[]): number => {
 try {
   process.exitCode = main(process.argv.slice(2));
 } catch (error) {
-  console.error(`byakugan: ${(error as Error).message}`);
+  // Messages can quote repository content (a JSON parse error shows the bad text).
+  console.error(`byakugan: ${safe(String((error as Error).message ?? error).replace(/[\r\n]+/g, ' '))}`);
   process.exitCode = 2;
 }

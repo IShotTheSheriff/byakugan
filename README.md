@@ -48,6 +48,11 @@ npm install --save-dev byakugan-cli
 ```
 
 The command is `byakugan`. It needs Node.js 20.19 or newer. CI runs on 22 and 24.
+The programmatic API ships types for TypeScript 5 or newer, with `@types/node`.
+
+The npm package is `byakugan-cli`, and an unrelated package named `byakugan`
+exists. Install byakugan-cli as a dev dependency and call it with
+`npx --no-install byakugan`, which fails instead of downloading the other one.
 
 ## Commands
 
@@ -153,7 +158,12 @@ an export (`src/lib/utils.ts#formatDate`), a package file
 ## CI recipes
 
 In GitHub Actions, `hash` and `affected` write `fingerprint=` and `affected=`
-to `$GITHUB_OUTPUT`.
+to `$GITHUB_OUTPUT`. Warnings (imports byakugan cannot follow, Tailwind
+failures) go to stderr, so stdout stays a fingerprint or JSON. `affected` also
+lists them under "warnings".
+
+The workflow needs only `contents: read`. Pass `github.base_ref` through `env`
+rather than into the script itself, so a branch name cannot inject shell code.
 
 ### Skip a build on a pull request
 
@@ -163,7 +173,9 @@ to `$GITHUB_OUTPUT`.
     fetch-depth: 0 # affected needs the merge base
 - run: npm ci
 - id: web
-  run: npx byakugan affected -C apps/web --base origin/${{ github.base_ref }}
+  env:
+    BASE_REF: ${{ github.base_ref }}
+  run: npx --no-install byakugan affected -C apps/web --base "origin/$BASE_REF"
 - if: steps.web.outputs.affected == 'true'
   run: npm run build --workspace web
 ```
@@ -173,7 +185,7 @@ to `$GITHUB_OUTPUT`.
 ```yaml
 - run: npm ci
 - id: web
-  run: npx byakugan hash -C apps/web
+  run: npx --no-install byakugan hash -C apps/web
 - id: cache
   uses: actions/cache@v4
   with:
@@ -192,13 +204,13 @@ Save a manifest on `main`, compare with it on pull requests:
 
 ```yaml
 # on push to main
-- run: npx byakugan hash -C apps/web --manifest .byakugan/web.json
+- run: npx --no-install byakugan hash -C apps/web --manifest .byakugan/web.json
 - uses: actions/upload-artifact@v4
   with: { name: byakugan-web, path: .byakugan/web.json }
 
 # on pull_request, after downloading that artifact
 - id: web
-  run: npx byakugan affected -C apps/web --base-manifest .byakugan/web.json
+  run: npx --no-install byakugan affected -C apps/web --base-manifest .byakugan/web.json
 ```
 
 See [examples/github-actions.yml](examples/github-actions.yml) for a full
@@ -240,14 +252,17 @@ workflow.
    `"sideEffects": false` are skipped unless a binding is used, as bundlers do.
    `Button.displayName = 'Button'` belongs to `Button`, not to the module.
 5. **Hash.** The fingerprint is SHA-256 over the sorted `(key, hash)` pairs of
-   live fragments. Keys are relative to the git root. Files in `node_modules`
-   are keyed as `npm:<package>/<path>`, so a pnpm store path or a version in
-   the path does not change them.
+   live fragments. Keys are relative to the workspace root: the nearest
+   directory with a lockfile or `pnpm-workspace.yaml`, searched up to the git
+   root. A source tarball without `.git` gets the same keys as a clone. Files in
+   `node_modules` are keyed as `npm:<package>/<path>`, so a pnpm store path or
+   a version in the path does not change them.
 
 Besides code, the fingerprint covers:
 
-- `package.json` without dependency ranges (the installed code is hashed
-  instead), the `tsconfig.json` chain, `.env*`, `public/**`, global `.d.ts`
+- `package.json` without dependency ranges when there is a lockfile (the
+  installed code is hashed instead; without a lockfile the ranges count), the
+  `tsconfig.json` or `jsconfig.json` chain, `.env*`, `public/**`, global `.d.ts`
   files and Next.js static metadata files such as `favicon.ico`;
 - the installed version of tools that read the app without being imported:
   `next`, `react`, `react-dom`, `typescript`, `tailwindcss`, `postcss`, `sass`
@@ -276,6 +291,8 @@ follows these too:
 | `'use server'` at the top of a file                               | Every export, since Next.js may register each one as an endpoint     |
 | `@import "tw-animate-css"`, `@import "shadcn/tailwind.css"`       | The package stylesheet, resolved with the `style` export condition   |
 | `@use 'tokens'`, `url("./bg.png")` in a stylesheet                | `_tokens.scss`, `bg.png`                                             |
+| `@import "/src/theme.css"`, `url("@/assets/hero.png")`            | `src/theme.css` under the project root, the file the alias names     |
+| `@use "pkg:bootstrap"` in Sass                                    | The package stylesheet, as for `@use "bootstrap"`                    |
 | `@plugin`, `@config` in a Tailwind stylesheet                     | The plugin or config module                                          |
 | `loaders: ["@tailwindcss/turbopack"]` in `next.config.ts`         | The package version                                                  |
 
@@ -292,7 +309,9 @@ process, scans the same files and hashes the CSS it generates. That hash is a
 fragment of the root stylesheet, `app/globals.css#<tailwind>`. Editing a file
 nobody imports counts only when the generated CSS changes. In git mode,
 byakugan runs Tailwind a second time with the base side's version of every
-changed file and compares the two outputs.
+changed file and compares the two outputs. With Tailwind v3, a Sass file that
+code imports is compiled with the project's `sass` first, so its partials count
+as part of one root, as they do in the build.
 
 **shadcn/ui** components are copied into the project, so they are ordinary
 project files. If the app renders `Dialog` and `DialogContent`, a change to
@@ -343,8 +362,10 @@ Standalone Hono apps get their entries from the project layout:
   negative patterns included.
 
 `serveStatic({ root: './public' })` makes every file under `public/` part of
-the graph. `cloudflare:workers`, `bun:sqlite` and `virtual:*` modules come
-from the runtime or bundler, so they are not reported as unresolved.
+the graph. `cloudflare:workers`, `bun`, `bun:sqlite` and `virtual:*` modules
+come from the runtime or bundler, so they are not reported as unresolved.
+Neither are `server-only`, `client-only` and `styled-jsx` in a Next.js app,
+since Next.js aliases them to its own copies.
 
 On the `nodejs`, `cloudflare-workers` and `x-basic` (HonoX) templates from
 `create-hono`, extended with routes in separate files, `zod` validation,
@@ -396,6 +417,8 @@ Everything is optional. Put a `byakugan.json` next to the app's `package.json`:
   "inputs": ["messages/*.json"],
   "packages": ["@sentry/nextjs"],
   "conditions": ["source"],
+  "generated": ["src/generated/**"],
+  "virtual": ["~icons/**"],
   "modularizeImports": {
     "my-icons": { "transform": "my-icons/icons/{{ kebabCase member }}" }
   }
@@ -407,10 +430,15 @@ Everything is optional. Put a `byakugan.json` next to the app's `package.json`:
 | `entry`             | Extra entry globs, added to the detected ones.                                                                  |
 | `inputs`            | Extra globs hashed as whole files.                                                                              |
 | `packages`          | Packages tracked by installed version.                                                                          |
-| `framework`         | `next`, `vite` or `none`. Overrides detection; `none` disables framework entries.                               |
+| `framework`         | `next`, `vite`, `react-router` or `none`. Overrides detection; `none` disables framework entries.               |
 | `conditions`        | Export conditions tried first. Use `["source"]` when workspace packages point `exports` at `dist`.              |
 | `modularizeImports` | Same shape as the Next.js option. Merged over the built-in `lodash` rule.                                       |
 | `jsxImportSource`   | Defaults to `compilerOptions.jsxImportSource` from `tsconfig.json`, then `react`.                               |
+| `generated`         | Git-ignored files the build generates, such as a Prisma client. Git mode skips its "ignored by git" reason for them. List the generator's inputs in `inputs`. |
+| `virtual`           | Specifiers a bundler plugin provides (globs), such as `~icons/**` for unplugin-icons. They no longer count as unresolved. |
+
+byakugan rejects a `byakugan.json` that is not valid JSON or has a field of
+the wrong type, for example a string where a list belongs.
 
 ## Limits
 
@@ -440,6 +468,26 @@ These cost extra builds:
 - **Directories read through `process.cwd()` count whole.**
   `join(process.cwd(), 'content', slug)` makes every file under `content/`
   part of the graph.
+- **Unresolved imports of project code count as affected, on every run.** An
+  import byakugan cannot resolve could hide anything, so it fails closed and
+  prints a warning. That covers relative paths, `#` and `~` imports, tsconfig
+  `paths`, `baseUrl` directories, workspace packages, and bare names that no
+  `package.json` declares (usually a bundler alias byakugan does not read, such
+  as a Vite `resolve.alias`), in imports and in stylesheet `url()` alike. A
+  declared npm package that is not installed does not count; the lockfile
+  covers it. An `import type` that does not resolve only warns. List plugin
+  virtual modules under `virtual`.
+- **Git-ignored files the app reads count as affected in git mode**, since git
+  has no base version to compare them with. List generated ones under
+  `generated`. A git-ignored `.env*` file, such as `.env.local`, only warns:
+  CI checks out no such file, so a laptop run would otherwise always report
+  "affected".
+- **A symlink inside a `dir/**` pattern to a directory under the same pattern
+  counts as the link.** `public/v2 -> v1` is an input hashed by its target, so
+  adding, removing or retargeting it counts, and edits under `v1` count through
+  `v1`'s own files. Any other link to a directory, such as
+  `public/shared -> ../assets` or `app/blog -> ../docs`, has its files listed
+  under the link's path. Git mode maps changes under the target to those paths.
 
 These can miss a change:
 
@@ -454,13 +502,52 @@ These can miss a change:
   database, `fetch` in `generateStaticParams`) and environment variables that
   CI sets rather than `.env*` files are not files byakugan can hash. Add them
   to your cache key.
-- **Git mode does not notice a new file that changes resolution**, for example
-  a new `utils/index.ts` next to `utils.ts`. The fingerprint does.
+- **Declaration order.** Moving `const a = 1` below the code that reads it at
+  the top level, or a base class below its subclass, throws at runtime, but
+  each declaration's text is unchanged, so nothing counts.
+- **`verbatimModuleSyntax` is read from the app's tsconfig chain only.** A
+  workspace package that sets it in its own tsconfig, while the app does not,
+  is parsed as if it were off: `import { type X }` there does not run the
+  module.
+- **Without `.git`, nothing above the workspace root is read.** The git root
+  is the boundary for paths in code, globs and symlinks. In a source tarball
+  the workspace root takes its place, so a file in `../shared` that a clone
+  would hash is skipped with a warning.
 - **Workspace packages that export `dist/`** hide source changes from git mode.
   byakugan prints a warning and suggests a `source` condition.
 
 Yarn Plug'n'Play is not supported, since byakugan reads packages from
 `node_modules`. Windows paths are untested.
+
+## Security
+
+byakugan reads a pull request's files, so treat its input as untrusted.
+
+- **It runs the project's Tailwind**, and Tailwind loads `tailwind.config.*`,
+  `@plugin` and `@config` modules, which are code from the repository. Run
+  byakugan only where you would run the build. The Tailwind child process is
+  killed after 120 s.
+- **It reads nothing outside the repository.** Imports, paths in code, globs
+  and symlinks that point outside the git root are skipped with a warning.
+  Installed packages count wherever their real path is, as long as that path is
+  inside a `node_modules` directory (a pnpm store, for example). It reads only
+  regular files, so a link to `/dev/zero` or a FIFO cannot block it. The
+  resolver reads `package.json` and tsconfig files on its own, so byakugan
+  stops with an error when a linked `.json` file (submodules included), or a
+  `package.json` on a lookup path, is not a regular file. A tsconfig `extends`
+  outside the repository is not read.
+- **Symlinks cannot make a crawl quadratic.** Each link target is entered at
+  most once per pattern, and a crawl that reaches more than 200,000
+  directories through links stops with an error.
+- **Git runs with `safe.bareRepository=explicit` and `core.fsmonitor=false`**,
+  so a committed directory laid out as a bare repository cannot make git run
+  its `core.fsmonitor` command. A `--base` that starts with `-` is rejected.
+- **Globs and patterns from the repository run in linear time.** byakugan
+  matches them one path segment at a time, instead of compiling them into a
+  regex that can backtrack for minutes.
+- **Text output escapes control characters**, so a file name holding terminal
+  escape sequences prints as plain text. Mermaid and DOT output escape quotes
+  and line breaks, so a file name cannot add a directive.
 
 ## Programmatic API
 

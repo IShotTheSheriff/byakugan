@@ -11,6 +11,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   web:
     runs-on: ubuntu-latest
@@ -24,16 +27,20 @@ jobs:
           node-version: 24
           cache: npm
 
+      # byakugan-cli is a dev dependency. --no-install fails instead of fetching the
+      # unrelated `byakugan` package from npm.
       - run: npm ci
 
       # On pull requests: does anything web uses differ from main?
       - id: changes
         if: github.event_name == 'pull_request'
-        run: npx byakugan affected -C apps/web --base origin/${{ github.base_ref }}
+        env:
+          BASE_REF: ${{ github.base_ref }} # through env, so a branch name cannot inject shell code
+        run: npx --no-install byakugan affected -C apps/web --base "origin/$BASE_REF"
 
       # Reuse .next when every fragment web uses is unchanged, dependencies included.
       - id: fingerprint
-        run: npx byakugan hash -C apps/web --manifest .byakugan/web.json
+        run: npx --no-install byakugan hash -C apps/web --manifest .byakugan/web.json
 
       - id: build-cache
         uses: actions/cache@v4

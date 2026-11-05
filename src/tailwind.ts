@@ -7,6 +7,10 @@ export interface TailwindRequest {
   dir: string;
   /** Root stylesheets, absolute paths. */
   roots: string[];
+  /** Root -> the stylesheets in its `@import` closure that hold Tailwind directives. */
+  members?: Record<string, string[]>;
+  /** The bundler inlines `@import` before PostCSS plugins run (Vite does), so v3 sees one stylesheet. */
+  inlineImports?: boolean;
   /** Absolute path -> content to scan instead of the file on disk, or `null` to leave it out. */
   overrides?: Record<string, string | null>;
 }
@@ -40,6 +44,8 @@ export const runTailwind = (request: TailwindRequest): TailwindResult[] => {
       cwd: request.dir,
       maxBuffer: 256 * 1024 * 1024,
       timeout: 120_000,
+      // Plugins are project code. One that ignores SIGTERM must not hang CI.
+      killSignal: 'SIGKILL',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     return JSON.parse(output.toString()) as TailwindResult[];
@@ -53,8 +59,8 @@ export const runTailwind = (request: TailwindRequest): TailwindResult[] => {
 const SKIP = ['**/node_modules/**', '**/.git/**', '**/.next/**', '**/.turbo/**', '**/.vercel/**', '**/dist/**', '**/build/**', '**/out/**'];
 const BINARY = /\.(png|jpe?g|gif|webp|avif|ico|bmp|tiff?|woff2?|ttf|otf|eot|mp[34]|webm|mov|wav|ogg|pdf|zip|gz|wasm|node)$/i;
 
-/** When Tailwind cannot run, everything it might scan is hashed whole instead. */
+/** When Tailwind cannot run, everything it might scan is hashed whole instead. `dir` is the repository root. */
 export const tailwindFallbackFiles = (dir: string): string[] =>
-  globSync('**/*', { cwd: dir, absolute: true, ignore: SKIP, onlyFiles: true })
+  globSync('**/*', { cwd: dir, absolute: true, ignore: SKIP, onlyFiles: true, followSymbolicLinks: false })
     .filter(f => !BINARY.test(f) && !/(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?)$/.test(f))
     .sort();

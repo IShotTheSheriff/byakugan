@@ -47,3 +47,21 @@ export const commitAll = (dir: string, message: string) => {
 export const fingerprintOf = (dir: string, cwd = dir) => analyze({ cwd }).fingerprint();
 
 export const liveKeys = (cwd: string) => [...analyze({ cwd }).live.keys()].sort();
+
+/**
+ * A project made from a file map, in a fresh temp dir. Values that are objects become JSON.
+ * With `repo`, the files are committed on `main` so tests can edit them and run git mode.
+ */
+export const app = (files: Record<string, string | object>, options: { repo?: boolean } = {}): string => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'byakugan-app-')));
+  for (const [path, content] of Object.entries(files)) write(dir, path, typeof content === 'string' ? content : `${JSON.stringify(content, null, 2)}\n`);
+  if (options.repo) initRepo(dir);
+  return dir;
+};
+
+/** A package in node_modules: `files` maps paths inside it to contents, package.json included. */
+export const pkg = (name: string, manifest: object, files: Record<string, string>): Record<string, string | object> => {
+  const out: Record<string, string | object> = { [`node_modules/${name}/package.json`]: { name, version: '1.0.0', ...manifest } };
+  for (const [path, content] of Object.entries(files)) out[`node_modules/${name}/${path}`] = content;
+  return out;
+};

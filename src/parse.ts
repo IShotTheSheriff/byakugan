@@ -78,8 +78,11 @@ export interface EsmModule {
   exports: Map<string, ExportEntry>;
   stars: StarExport[];
   decls: Map<string, Decl>;
-  /** Directives and top-level statements that run when the module is evaluated. */
-  effects: { text: string; usage: Usage };
+  /**
+   * Directives and top-level statements that run when the module is evaluated. `runs` is false
+   * when the text holds only JSX pragmas, which change how the file compiles but run nothing.
+   */
+  effects: { text: string; usage: Usage; runs: boolean };
   /** `declare global { ... }` and `declare module 'x' { ... }`: types only, they never run. */
   types: { text: string; usage: Usage };
   requests: ModuleRequest[];
@@ -88,13 +91,31 @@ export interface EsmModule {
   /** Module directives such as `use client` and `use server`. */
   directives: string[];
   jsx: boolean;
+  /** JSX compiles to factory calls (`jsx: "react"`, `@jsx h`), not runtime imports. */
+  jsxClassic: boolean;
+  /** `@jsxImportSource` pragma. */
+  jsxImportSource?: string;
+}
+
+/** Compiler settings that change what a module's code means. */
+export interface ParseOptions {
+  /** `import { type X } from './x'` keeps `import {} from './x'`, so `./x` still runs. */
+  verbatimModuleSyntax?: boolean;
+  /** TypeScript `jsx: "react"`: JSX calls `jsxFactory`, which must be in scope. */
+  jsxClassic?: boolean;
+  jsxFactory?: string;
+  jsxFragmentFactory?: string;
 }
 
 export interface OpaqueModule {
   kind: 'opaque';
   reason: 'commonjs' | 'asset' | 'parse-error' | 'mdx';
   content: string | Buffer;
+  /** Content hash for files too big to keep in memory. Wins over `content`. */
+  hash?: string;
   specifiers: string[];
+  /** Stylesheets only: absolute paths of `url()` targets that do not exist. */
+  missing?: string[];
   /** CommonJS only: see `Usage`. */
   contexts?: string[];
   paths?: string[];
@@ -252,50 +273,68 @@ const KEYED = new Set([
 ]);
 
 let sawJsx = false;
+/** Set while parsing a file whose JSX compiles to factory calls. */
+let jsxFactories: string[] | undefined;
+let jsxFragmentFactories: string[] | undefined;
+
+/** `React.createElement` refers to `React`, `h` to `h`. */
+const useFactory = (usage: Usage, factory: string) => {
+  const [root, member] = factory.split('.');
+  if (!root) return;
+  if (member) addMember(usage, root, member);
+  else usage.refs.add(root);
+};
+
+/** `require.context('./icons', true, /\.svg$/)` and `import.meta.webpackContext('./icons')`: a directory read whole. */
+const requireContext = (n: N, usage: Usage): boolean => {
+  const callee = node(n.callee);
+  if (callee?.type !== 'MemberExpression') return false;
+  const isRequire = nameOf(callee.object) === 'require' && nameOf(callee.property) === 'context';
+  if (!isRequire && !isImportMeta(callee, 'webpackContext')) return false;
+  const dir = staticString(nodes(n.arguments)[0]);
+  if (dir === undefined) usage.contexts.add('*');
+  else usage.paths.add(`file-tree\0${dir}`);
+  return true;
+};
+
+const NONE: unknown[] = [];
 
 /**
- * Collects every name a subtree might refer to. It over-approximates on purpose:
- * shadowed locals and binding names count as references. For change detection a
- * false "used" costs a rebuild, a false "unused" costs a missed one.
+ * One step of `walk`: records what `n` refers to and returns the children still to visit,
+ * or undefined to visit every child.
  */
-const walk = (value: unknown, usage: Usage): void => {
-  if (Array.isArray(value)) {
-    for (const item of value) walk(item, usage);
-    return;
-  }
-  if (!isNode(value)) return;
-  const n = value;
+const visit = (n: N, usage: Usage): unknown[] | undefined => {
   switch (n.type) {
     case 'Identifier':
     case 'JSXIdentifier':
       usage.refs.add(n.name as string);
-      break;
+      return;
     case 'MemberExpression': {
       const object = node(n.object);
       if (!n.computed && object?.type === 'Identifier') {
         addMember(usage, object.name as string, nameOf(n.property));
-        return;
+        return NONE;
       }
-      walk(n.object, usage);
-      if (n.computed) walk(n.property, usage);
-      return;
+      return n.computed ? [n.object, n.property] : [n.object];
     }
     case 'JSXMemberExpression': {
       const object = node(n.object);
-      if (object?.type === 'JSXIdentifier') addMember(usage, object.name as string, nameOf(n.property));
-      else walk(n.object, usage);
-      return;
+      if (object?.type !== 'JSXIdentifier') return [n.object];
+      addMember(usage, object.name as string, nameOf(n.property));
+      return NONE;
     }
     case 'TSQualifiedName': {
       const left = node(n.left);
-      if (left?.type === 'Identifier') addMember(usage, left.name as string, nameOf(n.right));
-      else walk(n.left, usage);
-      return;
+      if (left?.type !== 'Identifier') return [n.left];
+      addMember(usage, left.name as string, nameOf(n.right));
+      return NONE;
     }
     case 'JSXOpeningElement':
     case 'JSXOpeningFragment':
       sawJsx = true;
-      break;
+      for (const factory of jsxFactories ?? []) useFactory(usage, factory);
+      if (n.type === 'JSXOpeningFragment') for (const factory of jsxFragmentFactories ?? []) useFactory(usage, factory);
+      return;
     case 'JSXClosingElement':
     case 'JSXClosingFragment':
     case 'JSXNamespacedName':
@@ -303,33 +342,29 @@ const walk = (value: unknown, usage: Usage): void => {
     case 'BreakStatement':
     case 'ContinueStatement':
     case 'PrivateIdentifier':
-      return;
+      return NONE;
     case 'JSXAttribute':
-      walk(n.value, usage);
-      return;
+      return [n.value];
     case 'LabeledStatement':
-      walk(n.body, usage);
-      return;
+      return [n.body];
     case 'TSEnumMember':
-      walk(n.initializer, usage);
-      return;
+      return [n.initializer];
     case 'Literal':
       if (typeof n.value === 'string' && RELATIVE_FILE.test(n.value)) usage.paths.add(`rel\0${n.value}`);
-      return;
+      return NONE;
     case 'TemplateLiteral': {
       const fixed = staticString(n);
       if (fixed !== undefined && RELATIVE_FILE.test(fixed)) usage.paths.add(`rel\0${fixed}`);
-      break;
+      return;
     }
     case 'ImportExpression': {
       const specifier = staticString(n.source);
-      if (specifier !== undefined) usage.dynamic.add(specifier);
-      else {
-        usage.contexts.add(specifierPattern(n.source));
-        walk(n.source, usage);
+      if (specifier !== undefined) {
+        usage.dynamic.add(specifier);
+        return [n.options];
       }
-      walk(n.options, usage);
-      return;
+      usage.contexts.add(specifierPattern(n.source));
+      return [n.source, n.options];
     }
     case 'CallExpression': {
       const callee = node(n.callee);
@@ -338,37 +373,60 @@ const walk = (value: unknown, usage: Usage): void => {
         const specifier = staticString(args[0]);
         if (specifier !== undefined) {
           usage.dynamic.add(specifier);
-          return;
+          return NONE;
         }
         usage.contexts.add(specifierPattern(args[0]));
-        break;
+        return;
       }
+      if (requireContext(n, usage)) return;
       const path = joinedPath(n) ?? staticRoot(n);
       if (path !== undefined) usage.paths.add(path);
       const globs = globPatterns(n);
       if (globs?.length === 0) usage.contexts.add('*');
       else if (globs) usage.paths.add(`glob\0${globs.join(GLOB_SEPARATOR)}`);
-      break;
+      return;
     }
     case 'NewExpression': {
       const args = nodes(n.arguments);
       const target = args.length === 2 && nameOf(n.callee) === 'URL' && isImportMetaUrl(args[1]) ? staticString(args[0]) : undefined;
       if (target !== undefined && !/^[a-z][\w+.-]*:/i.test(target)) usage.paths.add(`file\0${target}`);
-      break;
+      return;
     }
     case 'TSImportType': {
       const specifier = staticString(n.source ?? n.argument);
       if (specifier !== undefined) usage.types.add(specifier);
-      walk(n.typeArguments, usage);
-      return;
+      return [n.typeArguments];
     }
   }
-  const keys = visitorKeys[n.type];
-  if (!keys) return;
-  const skipKey = KEYED.has(n.type) && !n.computed;
-  for (const key of keys) {
-    if (skipKey && key === 'key') continue;
-    walk(n[key], usage);
+};
+
+/**
+ * Collects every name a subtree might refer to. It over-approximates on purpose:
+ * shadowed locals and binding names count as references. For change detection a
+ * false "used" costs a rebuild, a false "unused" costs a missed one.
+ * Iterative, so generated code nested thousands of levels deep does not overflow the stack.
+ */
+const walk = (root: unknown, usage: Usage): void => {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (Array.isArray(value)) {
+      for (let i = value.length - 1; i >= 0; i--) stack.push(value[i]);
+      continue;
+    }
+    if (!isNode(value)) continue;
+    const children = visit(value, usage);
+    if (children) {
+      for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+      continue;
+    }
+    const keys = visitorKeys[value.type];
+    if (!keys) continue;
+    const skipKey = KEYED.has(value.type) && !value.computed;
+    for (let i = keys.length - 1; i >= 0; i--) {
+      if (skipKey && keys[i] === 'key') continue;
+      stack.push(value[keys[i]]);
+    }
   }
 };
 
@@ -423,13 +481,62 @@ export interface ParseOutcome {
   errors: string[];
 }
 
-export const parseModule = (file: string, source: string): ParseOutcome => {
+/** Like Babel: the pragma starts a comment line (after `*` in a block comment). `// pass @jsx through` is prose. */
+const JSX_PRAGMA = /(?:^|\n)[ \t]*\*?[ \t]*@(jsx|jsxFrag|jsxImportSource|jsxRuntime)[ \t]+([^\s*]+)/g;
+
+/** `@jsx h`, `@jsxFrag Fragment`, `@jsxImportSource @emotion/react`, `@jsxRuntime classic`. */
+const jsxPragmas = (result: ParseResult) => {
+  const found: Record<string, string> = {};
+  const texts: string[] = [];
+  for (const comment of result.comments ?? []) {
+    const matches = [...comment.value.matchAll(JSX_PRAGMA)];
+    if (matches.length === 0) continue;
+    texts.push(comment.value.trim());
+    for (const m of matches) found[m[1]] = m[2];
+  }
+  return { found, text: texts.join('\n') };
+};
+
+export const parseModule = (file: string, source: string, options: ParseOptions = {}): ParseOutcome => {
   sawJsx = false;
   const result = parseSync(file, source, { sourceType: 'unambiguous' });
-  const program = result.program as unknown as N;
   const errors = result.errors.map(e => e.message);
   if (errors.length > 0) return { module: parseErrorFallback(source, result), errors };
+  const pragmas = jsxPragmas(result);
+  const runtime = pragmas.found.jsxRuntime;
+  const classic =
+    runtime === 'classic' ||
+    (runtime !== 'automatic' && pragmas.found.jsxImportSource === undefined && (pragmas.found.jsx !== undefined || options.jsxClassic === true));
+  jsxFactories = classic ? [pragmas.found.jsx ?? options.jsxFactory ?? 'React.createElement'] : undefined;
+  jsxFragmentFactories = classic ? [pragmas.found.jsxFrag ?? options.jsxFragmentFactory ?? 'React.Fragment'] : undefined;
+  try {
+    return analyze(source, result, options, { classic, importSource: pragmas.found.jsxImportSource, text: pragmas.text });
+  } catch (error) {
+    // A stack overflow on pathological input: hash the whole file and keep its static imports.
+    return { module: parseErrorFallback(source, result), errors: [`cannot analyze (${(error as Error).message})`] };
+  } finally {
+    jsxFactories = jsxFragmentFactories = undefined;
+  }
+};
 
+const FRESH_VALUES = new Set(['ObjectExpression', 'ArrayExpression', 'ArrowFunctionExpression', 'FunctionExpression', 'ClassExpression', 'NewExpression']);
+const WRAPPERS = new Set(['TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'TSTypeAssertion', 'ParenthesizedExpression']);
+
+/** `const config = {}`: an object only this binding can reach, so `config.x = 1` belongs to it. */
+const isFreshValue = (init: unknown): boolean => {
+  let current = node(init);
+  while (current && WRAPPERS.has(current.type)) current = node(current.expression);
+  return current !== undefined && FRESH_VALUES.has(current.type);
+};
+
+const analyze = (
+  source: string,
+  result: ParseResult,
+  options: ParseOptions,
+  jsx: { classic: boolean; importSource?: string; text: string }
+): ParseOutcome => {
+  const program = result.program as unknown as N;
+  const errors: string[] = [];
   if (!result.module.hasModuleSyntax) {
     const usage = newUsage();
     walk(program, usage);
@@ -458,8 +565,27 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
   const typeEffects: string[] = [];
   const typeUsage = newUsage();
   const assigns: N[] = [];
+  /** Bindings whose value is a function, class or literal object, which member assignments may extend. */
+  const attachable = new Set<string>();
   const directives: string[] = [];
   let exportEquals = false;
+  if (jsx.text) effects.push({ pos: -1, text: jsx.text });
+
+  /** A class with decorators written before `export` starts at the first decorator. */
+  const spanOf = (stmt: N, decl: N) => {
+    const first = nodes(decl.decorators)[0];
+    return first && first.start < stmt.start ? source.slice(first.start, stmt.end) : slice(stmt);
+  };
+
+  /** Decorators and static blocks run when the class is defined, like top-level code (route registration, DI). */
+  const classEffects = (stmt: N, decl: N, name: string) => {
+    const members = nodes(node(decl.body)?.body);
+    // `constructor(@Inject('a') a)`: parameter decorators run on definition too.
+    const decoratedParams = (m: N) => nodes(node(m.value)?.params).some(p => nodes(p.decorators).length > 0);
+    if (nodes(decl.decorators).length === 0 && !members.some(m => m.type === 'StaticBlock' || nodes(m.decorators).length > 0 || decoratedParams(m))) return;
+    effects.push({ pos: stmt.start, text: `class ${name} runs on definition` });
+    effectUsage.refs.add(name);
+  };
 
   const declare = (names: string[], text: string, subtree: unknown) => {
     const usage = newUsage();
@@ -491,6 +617,7 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
         for (const declarator of nodes(decl.declarations)) {
           const names = bindingNames(declarator.id);
           declare(names, prefix + slice(declarator), declarator);
+          if (names.length === 1 && isFreshValue(declarator.init)) attachable.add(names[0]);
           if (exported) for (const name of names) exportLocal(name, false);
         }
         return;
@@ -502,7 +629,9 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
       case 'TSTypeAliasDeclaration':
       case 'TSEnumDeclaration': {
         const name = nameOf(decl.id);
-        declare([name], slice(stmt), decl);
+        declare([name], spanOf(stmt, decl), decl);
+        if (decl.type === 'FunctionDeclaration' || decl.type === 'ClassDeclaration') attachable.add(name);
+        if (decl.type === 'ClassDeclaration') classEffects(stmt, decl, name);
         if (exported) exportLocal(name, decl.type === 'TSInterfaceDeclaration' || decl.type === 'TSTypeAliasDeclaration');
         return;
       }
@@ -552,7 +681,8 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
           const binding = imported === '*' ? `* as ${local}` : imported === local ? local : `${imported} as ${local}`;
           imports.set(local, { local, source, imported, type, text: `import ${type ? 'type ' : ''}${binding} from ${source}` });
         }
-        requests.push({ source, bare: specifiers.length === 0, type: allType, named });
+        // With verbatimModuleSyntax, `import { type X } from './x'` compiles to `import {} from './x'`.
+        requests.push({ source, bare: specifiers.length === 0, type: options.verbatimModuleSyntax ? declType : allType, named });
         // `import 'polyfill'` runs code and nothing else names it, so it is part of the module's effects.
         if (specifiers.length === 0 && !declType) effects.push({ pos: stmt.start, text: slice(stmt) });
         break;
@@ -582,7 +712,7 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
               : { name: exported, source, imported: local, type, text: `${head} from ${source}` }
           );
         }
-        if (source !== undefined) requests.push({ source, bare: false, type: allType, named });
+        if (source !== undefined) requests.push({ source, bare: false, type: options.verbatimModuleSyntax ? declType : allType, named });
         break;
       }
       case 'ExportDefaultDeclaration': {
@@ -595,13 +725,16 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
             declaration.type === 'ClassDeclaration' ||
             declaration.type === 'TSInterfaceDeclaration')
         ) {
-          declare([id.name as string], slice(stmt), declaration);
+          declare([id.name as string], spanOf(stmt, declaration), declaration);
+          if (declaration.type !== 'TSInterfaceDeclaration') attachable.add(id.name as string);
+          if (declaration.type === 'ClassDeclaration') classEffects(stmt, declaration, id.name as string);
           exports.set('default', { name: 'default', local: id.name as string, type: declaration.type === 'TSInterfaceDeclaration' });
         } else if (declaration.type === 'Identifier') {
           const local = declaration.name as string;
           exports.set('default', { name: 'default', local, type: false, text: `export default ${local}` });
         } else {
-          declare(['default'], slice(stmt), declaration);
+          declare(['default'], spanOf(stmt, declaration), declaration);
+          if (declaration.type === 'ClassDeclaration') classEffects(stmt, declaration, 'default');
           exports.set('default', { name: 'default', local: 'default', type: false });
         }
         break;
@@ -610,10 +743,11 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
         const source = staticString(stmt.source) ?? '';
         const type = stmt.exportKind === 'type';
         const exported = node(stmt.exported);
+        const head = `export ${type ? 'type ' : ''}*`;
         if (exported) {
           const name = nameOf(exported);
-          exports.set(name, { name, source, imported: '*', type, text: `export * as ${name} from ${source}` });
-        } else stars.push({ source, type, text: `export * from ${source}` });
+          exports.set(name, { name, source, imported: '*', type, text: `${head} as ${name} from ${source}` });
+        } else stars.push({ source, type, text: `${head} from ${source}` });
         requests.push({ source, bare: false, type, named: false });
         break;
       }
@@ -647,7 +781,9 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
 
   for (const stmt of assigns) {
     const root = rootIdentifier(node(node(stmt.expression)?.left) as N);
-    const decl = root === undefined || imports.has(root) ? undefined : decls.get(root);
+    // `Foo.displayName = 'Foo'` extends Foo. `root.dataset.theme = 'dark'` on `const root = document.documentElement`
+    // changes the page, so it stays a side effect.
+    const decl = root === undefined || imports.has(root) || !attachable.has(root) ? undefined : decls.get(root);
     if (decl) {
       decl.text += `\n${slice(stmt)}`;
       walk(stmt, decl.usage);
@@ -662,18 +798,21 @@ export const parseModule = (file: string, source: string): ParseOutcome => {
       exports,
       stars,
       decls,
-      effects: { text: effects.map(e => e.text).join('\n'), usage: effectUsage },
+      effects: { text: effects.map(e => e.text).join('\n'), usage: effectUsage, runs: effects.some(e => e.pos >= 0) },
       types: { text: typeEffects.join('\n'), usage: typeUsage },
       requests,
       exportEquals,
       directives,
       jsx: sawJsx,
+      jsxClassic: jsx.classic,
+      jsxImportSource: jsx.importSource,
     },
     errors,
   };
 };
 
-const MDX_IMPORT = /^\s*(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]/gm;
+// `[ \t]*`, not `\s*`: under the `m` flag, `^\s*` retries from every line of a blank run (quadratic).
+const MDX_IMPORT = /^[ \t]*(?:import|export)\s[^'";]{0,2000}?from\s*['"]([^'"]+)['"]|^[ \t]*import\s*['"]([^'"]+)['"]/gm;
 
 /** MDX files are hashed whole; their `import` lines still extend the graph. */
 export const mdxModule = (source: string): OpaqueModule => {
