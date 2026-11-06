@@ -1,7 +1,6 @@
 # byakugan
 
-byakugan builds the graph of code a TypeScript, React or Next.js app actually
-uses. It goes down to single exports inside barrel files and into npm packages.
+byakugan builds the graph of code a TypeScript, React or Next.js app uses. It goes down to single exports inside barrel files and into npm packages.
 CI can use that graph to skip a build when a change cannot reach the app.
 
 byakugan is [Knip][knip]'s approach turned around. Knip walks from an app's
@@ -68,8 +67,8 @@ graph in other formats.
 ```console
 $ byakugan graph -C apps/web
 byakugan · next · 5 entries
-14 project files · 7 files in 3 packages · 33 live fragments
-fingerprint 308d781e06cddcdc0887b72e68b6200b8e78819742ae94afb3d8d51a7d7c76ec
+14 project files · 7 files in 3 packages · 36 live fragments
+fingerprint 789d5ce9ae9957e7d92cda9119814fe6dc3cea0b2cfa1da90781c570eab0b7eb
 
 entries
   apps/web/app/api/health/route.ts
@@ -101,11 +100,12 @@ packages
 
 tracked by version  next, react
 
-inputs  apps/web/package.json, apps/web/public/logo.svg, apps/web/tsconfig.json
+inputs  apps/web/package.json, apps/web/public/logo.svg, apps/web/tsconfig.json, packages/ui/package.json
 ```
 
-This is the `test/fixtures/monorepo` app. `components/Unused.tsx` is missing
-from the list because nothing imports it.
+This is the `test/fixtures/monorepo` app, with `@acme/ui` linked into
+`node_modules` as npm workspaces do it. `components/Unused.tsx` is missing from
+the list because nothing imports it.
 
 `runs, nothing used` means the module is loaded (the barrel imports it), so its
 top-level side effects count, but none of its declarations do.
@@ -149,7 +149,8 @@ changes nothing uses
 ```
 
 `--exit-code` exits with 1 when affected and 0 when not, like
-`git diff --exit-code`. `--json` prints the result as JSON.
+`git diff --exit-code`. `--json` prints the result as JSON. `--verbose` lists
+every reason and every ignored change.
 
 ### `byakugan why <target>`
 
@@ -170,7 +171,7 @@ rather than into the script itself, so a branch name cannot inject shell code.
 ### Skip a build on a pull request
 
 ```yaml
-- uses: actions/checkout@v5
+- uses: actions/checkout@v7
   with:
     fetch-depth: 0 # affected needs the merge base
 - run: npm ci
@@ -189,7 +190,7 @@ rather than into the script itself, so a branch name cannot inject shell code.
 - id: web
   run: npx --no-install byakugan hash -C apps/web
 - id: cache
-  uses: actions/cache@v4
+  uses: actions/cache@v6
   with:
     path: apps/web/.next
     key: web-next-${{ steps.web.outputs.fingerprint }}
@@ -207,7 +208,7 @@ Save a manifest on `main`, compare with it on pull requests:
 ```yaml
 # on push to main
 - run: npx --no-install byakugan hash -C apps/web --manifest .byakugan/web.json
-- uses: actions/upload-artifact@v4
+- uses: actions/upload-artifact@v6
   with: { name: byakugan-web, path: .byakugan/web.json }
 
 # on pull_request, after downloading that artifact
@@ -220,29 +221,35 @@ workflow.
 
 ## How it works
 
-1. **Entries.** In a Next.js app these are App Router files (`page`, `layout`,
-   `route`, `loading`, `error`, `not-found`, `global-not-found`, metadata
-   routes, and the rest), everything under `pages/`, `middleware`/`proxy`,
-   `instrumentation`, `mdx-components`, `next.config.*`, and files plugins load
-   by convention (next-intl `i18n/request.ts`, Sentry `sentry.*.config.ts`). In
-   a Vite app they are the
-   `<script src>` tags in `index.html` and `vite.config.*`. Other projects use
-   `package.json` fields, then `{index,main,server,app}.*` in the root or
-   `src/`. Every project also gets `main` from `wrangler.{toml,json,jsonc}`,
-   Vercel `api/**` and Netlify functions, files a config names in a string
-   (Vite inputs such as `/app/client.ts`), and the `entry` globs from
-   `byakugan.json`. Every export of an entry counts as used.
+1. **Entries.** Every export of an entry counts as used. byakugan finds
+   entries by framework:
+
+   - Next.js: App Router files (`page`, `layout`, `route`, `loading`, `error`,
+     `not-found`, `global-not-found`, metadata routes and the rest), everything
+     under `pages/`, `middleware` or `proxy`, `instrumentation`,
+     `mdx-components`, `next.config.*`, and files that plugins load by
+     convention (next-intl `i18n/request.ts`, Sentry `sentry.*.config.ts`).
+   - Vite: the `<script src>` tags in `index.html`, and `vite.config.*`.
+   - Anything else: `package.json` fields, then `{index,main,server,app}.*` in
+     the root or in `src/`.
+
+   Every project also gets `main` from `wrangler.{toml,json,jsonc}`, Vercel
+   `api/**` and Netlify functions, files a config names in a string (Vite
+   inputs such as `/app/client.ts`), and the `entry` globs from
+   `byakugan.json`.
 2. **Fragments.** [oxc-parser][oxc] splits each reached module into fragments:
    top-level declarations, import bindings, export specifiers, `export *` lines,
    and the module's side effects (directives such as `'use client'`, bare
    imports such as `import './polyfill'`, and top-level statements).
    `declare global` and `declare module` blocks form a separate types fragment.
    byakugan records, per declaration, which top-level names it refers to.
-   A fragment's hash leaves out comments, and each run of whitespace outside
-   strings counts as one space or one line break, so editing a comment or
-   reindenting a function changes nothing. A comment that labels an argument,
-   as in `f(/* force */ true)`, changes nothing either. JSX text counts as the compiler
-   keeps it. These comments still count, since they change what a tool does:
+
+   A fragment's hash leaves out comments. Each run of whitespace outside
+   strings counts as one space or one line break. So editing a comment or
+   reindenting a function changes nothing, and neither does a comment that
+   labels an argument, as in `f(/* force */ true)`. Whitespace in JSX text
+   counts the way the JSX compiler keeps it. These comments still count,
+   because they change what a tool does:
 
    - minifier and bundler hints: `#__PURE__`, `webpackChunkName`, `@vite-ignore`
    - legal comments: `/*!`, `//!`, `@license`, `@preserve`
@@ -256,15 +263,17 @@ workflow.
    an import, counts with the module's side effects.
 3. **Walk.** A used export leads to its declaration. The declaration leads to
    the names it refers to. An import binding leads to the export of the module
-   it resolves to ([oxc-resolver][oxc-resolver], with tsconfig `paths` and
-   `exports` conditions for browser, node and `react-server`). The walk crosses
-   `export *` barrels, namespace imports used as `ns.member`, `import()`,
-   `require()`, `next/dynamic`, `React.lazy`, the implicit JSX runtime and
-   workspace symlinks. It also follows imports and paths that are not plain
-   imports; [Next.js, Tailwind and shadcn](#nextjs-tailwind-and-shadcn) lists
-   them. An `import type` is followed through types only: the declarations it
-   reaches count, but the target module does not run, so its side effects and
-   the packages only its runtime code imports stay out.
+   it resolves to. [oxc-resolver][oxc-resolver] does the resolving, with
+   tsconfig `paths` and `exports` conditions for browser, node and
+   `react-server`. The walk crosses `export *` barrels, namespace imports used
+   as `ns.member`, `import()`, `require()`, `next/dynamic`, `React.lazy`, the
+   implicit JSX runtime and workspace symlinks. It also follows paths that are
+   not imports at all, listed under
+   [Next.js, Tailwind and shadcn](#nextjs-tailwind-and-shadcn).
+
+   byakugan follows an `import type` through types only. The declarations it
+   reaches count, but the target module does not run. Its side effects stay
+   out, and so do packages that only its runtime code imports.
 4. **Modules that run.** Importing a module runs it, so its side-effect
    fragment counts even when no export is used. Packages with
    `"sideEffects": false` are skipped unless a binding is used, as bundlers do.
@@ -278,10 +287,10 @@ workflow.
 
 Besides code, the fingerprint covers:
 
-- `package.json` without dependency ranges when there is a lockfile (the
-  installed code is hashed instead; without a lockfile the ranges count), the
-  `tsconfig.json` or `jsconfig.json` chain, `.env*`, `public/**`, global `.d.ts`
-  files and Next.js static metadata files such as `favicon.ico`;
+- `package.json`. With a lockfile, byakugan leaves out the dependency ranges,
+  because it hashes the installed code instead. Without one, the ranges count.
+- the `tsconfig.json` or `jsconfig.json` chain, `.env*`, `public/**`, global
+  `.d.ts` files and Next.js static metadata files such as `favicon.ico`;
 - the installed version of tools that read the app without being imported:
   `next`, `react`, `react-dom`, `typescript`, `tailwindcss`, `postcss`, `sass`
   and similar, when they are dependencies, plus any dependency a config file
@@ -609,7 +618,7 @@ Fixtures live in `test/fixtures`. They include small fake copies of `lodash`,
 It checks that the tag matches `package.json` and sits on `main`. Then it
 runs the tests, installs the packed tarball and runs it on a fixture. It
 publishes through npm trusted publishing, so the repository stores no npm
-token and every version gets a provenance attestation. A version with a
+token. npm adds a provenance attestation only while the repository is public. A version with a
 hyphen, like `0.2.0-beta.1`, goes to the `next` dist-tag, the rest to
 `latest`. The workflow also creates a GitHub release with generated notes.
 
