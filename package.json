@@ -1,6 +1,6 @@
 {
   "name": "byakugan-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Build the graph of code your TypeScript/React/Next.js app actually uses, down to single exports inside barrels and npm packages, and use it for precise change detection in CI",
   "keywords": [
     "change detection",
