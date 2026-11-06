@@ -79,6 +79,8 @@ npm run build                  # dist/ for the published bin
 node src/cli.ts graph -C test/fixtures/basic
 ```
 
+Releases go through a `v*` tag; README.md, Releasing, has the steps.
+
 Tests copy a fixture to a temp dir (`fixture()` in `test/helpers.ts`), or build
 one from a file map (`app(files, { repo: true })`, `pkg()`), edit it,
 and compare fingerprints or `affected` results. `test/tailwind.test.ts` links

@@ -601,6 +601,25 @@ node src/cli.ts graph -C test/fixtures/basic
 Fixtures live in `test/fixtures`. They include small fake copies of `lodash`,
 `next` and `react` in their own `node_modules`, which git tracks.
 
+### Releasing
+
+`.github/workflows/release.yml` publishes to npm when a `v*` tag is pushed.
+It checks that the tag matches `package.json` and sits on `main`. Then it
+runs the tests, installs the packed tarball and runs it on a fixture. It
+publishes through npm trusted publishing, so the repository stores no npm
+token and every version gets a provenance attestation. A version with a
+hyphen, like `0.2.0-beta.1`, goes to the `next` dist-tag, the rest to
+`latest`. The workflow also creates a GitHub release with generated notes.
+
+```sh
+npm version minor   # or patch, major, prerelease --preid beta
+git push origin main --follow-tags
+```
+
+npm links the package to this workflow under Settings, Trusted publishing
+on npmjs.com, with environment `npm`. The repository needs a GitHub
+environment of that name.
+
 ## Prior art
 
 Knip by Lars Kappert, which byakugan's module graph borrows ideas from, and the

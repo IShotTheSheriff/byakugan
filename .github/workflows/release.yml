@@ -1,0 +1,73 @@
+name: release
+
+# Pushing a tag like v0.2.0 publishes that version to npm through trusted
+# publishing (OIDC), so the repository holds no npm token.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    # npm accepts the OIDC token only from this environment, which the
+    # trusted publisher settings on npmjs.com name.
+    environment: npm
+    permissions:
+      contents: write # gh release create
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check that the tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $version" >&2
+            exit 1
+          fi
+      - name: Check that the tag is on main
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - run: npm install --global npm@11.21.1
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Run the packed tarball
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          dir="$RUNNER_TEMP/smoke"
+          mkdir "$dir"
+          cd "$dir"
+          npm init --yes > /dev/null
+          npm install "$RUNNER_TEMP"/byakugan-cli-*.tgz
+          npx --no-install byakugan -C "$GITHUB_WORKSPACE/test/fixtures/basic"
+      - name: Publish
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) tag=next ;;
+            *) tag=latest ;;
+          esac
+          npm publish --access public --tag "$tag" --ignore-scripts
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $prerelease
