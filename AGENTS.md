@@ -11,7 +11,10 @@ README.md explains the model and its limits; read it first.
   including bare imports, `<types>` for `declare global` and `declare module`)
   with the names each declaration refers to, plus computed `import()` patterns
   (`contexts`) and file paths in code (`paths`). CommonJS, assets, MDX and files
-  with parse errors are `opaque` and hashed whole.
+  with parse errors are `opaque` and hashed whole. Fragment text comes from
+  `sourceText`: comments that `isSignificant` does not keep are dropped and
+  whitespace outside literals collapses. Significant comments outside every
+  fragment join `<module>`. Files in `node_modules` keep their raw text.
 - `src/graph.ts`: the walk. Node ids are `M` (module runs), `S` (export used),
   `D` (local binding used), `I` (input), and `T` and `Y`, an export or binding
   reached only through types (`import type`, `typeof x` in a type). `T` and `Y`
@@ -44,6 +47,10 @@ README.md explains the model and its limits; read it first.
   fragment that changed but is not live, git mode asks
   `graph.wants(file, id, baseModule)`, so a new kind of fragment id needs a
   case there too.
+- In `analyze`, cut fragment text with `slice` or `span`, never
+  `source.slice`, which would make comment edits count again. A new
+  significant comment needs a "counts" row in the fragment text tests of
+  `test/parse.test.ts`.
 - When unsure, over-approximate: more live fragments cost a rebuild, fewer
   ship a stale app.
 - Keys must not contain absolute paths or package versions. Fingerprints have

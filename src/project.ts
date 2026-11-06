@@ -649,6 +649,7 @@ export const loadProject = (options: LoadProjectOptions = {}): Project => {
     parseOptions: {
       verbatimModuleSyntax: compilerOptions.verbatimModuleSyntax === true || compilerOptions.preserveValueImports === true,
       jsxClassic: compilerOptions.jsx === 'react',
+      checkJs: compilerOptions.checkJs === true,
       jsxFactory: typeof compilerOptions.jsxFactory === 'string' ? compilerOptions.jsxFactory : undefined,
       jsxFragmentFactory: typeof compilerOptions.jsxFragmentFactory === 'string' ? compilerOptions.jsxFragmentFactory : undefined,
     },

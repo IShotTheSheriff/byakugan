@@ -1007,3 +1007,95 @@ describe('git mode: an added import of a module unchanged code runs later', () =
     assert.equal(result.affected, false);
   });
 });
+
+describe('comments', () => {
+  const lib = 'export function add(a: number, b: number) {\n  return a + b;\n}\n';
+  const files = { 'src/main.ts': "import { add } from './lib';\nconsole.log(add(1, 2));\n", 'src/lib.ts': lib };
+
+  test('a comment inside a used function does not count', () => {
+    const { result, moved } = compare(files, { 'src/lib.ts': lib.replace('  return', '  // the sum\n  return') });
+    assert.equal(moved, false);
+    assert.equal(result.affected, false);
+  });
+
+  test('a code change in the same function counts', () => {
+    const { keys, moved } = compare(files, { 'src/lib.ts': lib.replace('a + b', 'a - b') });
+    assert.equal(moved, true);
+    assert.deepEqual(keys, ['src/lib.ts#add']);
+  });
+
+  test('@ts-expect-error inside it counts', () => {
+    const { keys, moved } = compare(files, { 'src/lib.ts': lib.replace('  return', '  // @ts-expect-error\n  return') });
+    assert.equal(moved, true);
+    assert.deepEqual(keys, ['src/lib.ts#add']);
+  });
+
+  test('@ts-expect-error above an import counts, though no declaration holds it', () => {
+    const { keys, moved } = compare(files, { 'src/main.ts': `// @ts-expect-error untyped\n${files['src/main.ts']}` });
+    assert.equal(moved, true);
+    assert.deepEqual(keys, ['src/main.ts#<module>']);
+  });
+
+  test('a plain comment above an import does not count', () => {
+    const { result, moved } = compare(files, { 'src/main.ts': `// the entry\n${files['src/main.ts']}` });
+    assert.equal(moved, false);
+    assert.equal(result.affected, false);
+  });
+
+  describe('in JSX', () => {
+    const view = 'export const View = () => (\n  <div>\n    <h1>Title</h1>\n    <p>Body</p>\n  </div>\n);\n';
+    const jsx = { 'byakugan.json': { entry: ['src/main.tsx'] }, 'src/main.tsx': "import { View } from './view';\nexport const App = () => <View />;\n", 'src/view.tsx': view };
+
+    test('a {/* note */} line in a used component does not count', () => {
+      const { result, moved } = compare(jsx, { 'src/view.tsx': view.replace('    <p>', '    {/* the body */}\n    <p>') });
+      assert.equal(moved, false);
+      assert.equal(result.affected, false);
+    });
+
+    test('a text change in it counts', () => {
+      const { keys, moved } = compare(jsx, { 'src/view.tsx': view.replace('Body', 'Body text') });
+      assert.equal(moved, true);
+      assert.deepEqual(keys, ['src/view.tsx#View']);
+    });
+  });
+
+  describe('JSDoc in JavaScript', () => {
+    const js = 'export const parse = (s) => {\n  /** @type {number} */\n  const n = Number(s);\n  return n;\n};\n';
+    const files = (compilerOptions: object) => ({
+      'byakugan.json': { entry: ['src/main.js'] },
+      'tsconfig.json': { compilerOptions },
+      'src/main.js': "import { parse } from './parse.js';\nconsole.log(parse('1'));\n",
+      'src/parse.js': js,
+    });
+    const edited = { 'src/parse.js': js.replace('{number}', '{string}') };
+
+    test('counts when tsconfig sets checkJs', () => {
+      const { keys, moved } = compare(files({ allowJs: true, checkJs: true }), edited);
+      assert.equal(moved, true);
+      assert.deepEqual(keys, ['src/parse.js#parse']);
+    });
+
+    test('does not count when TypeScript does not check the file', () => {
+      const { result, moved } = compare(files({ allowJs: true }), edited);
+      assert.equal(moved, false);
+      assert.equal(result.affected, false);
+    });
+  });
+
+  describe('in CommonJS', () => {
+    const legacy = "const base = 2;\nmodule.exports = (n) => n * base;\n";
+    const cjs = { 'src/main.ts': "import double from './legacy.cjs';\nconsole.log(double(1));\n", 'src/legacy.cjs': legacy };
+
+    test('a comment in a required file does not count', () => {
+      const { result, moved } = compare(cjs, { 'src/legacy.cjs': `// old code\n${legacy.replace('base = 2;', 'base = 2; // why two')}` });
+      assert.equal(moved, false);
+      assert.equal(result.affected, false);
+    });
+
+    test('a code change in it counts', () => {
+      const { result, moved } = compare(cjs, { 'src/legacy.cjs': legacy.replace('2', '3') });
+      assert.equal(moved, true);
+      assert.equal(result.affected, true);
+    });
+  });
+});

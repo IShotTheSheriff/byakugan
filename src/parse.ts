@@ -1,4 +1,5 @@
 import { parseSync, visitorKeys } from 'oxc-parser';
+import { isInNodeModules } from './resolve.ts';
 
 /** Names a piece of code refers to. Collected per top-level declaration. */
 export interface Usage {
@@ -105,6 +106,8 @@ export interface ParseOptions {
   jsxClassic?: boolean;
   jsxFactory?: string;
   jsxFragmentFactory?: string;
+  /** TypeScript checks JavaScript files, so JSDoc tags in them are types. */
+  checkJs?: boolean;
 }
 
 export interface OpaqueModule {
@@ -481,8 +484,12 @@ export interface ParseOutcome {
   errors: string[];
 }
 
-/** Like Babel: the pragma starts a comment line (after `*` in a block comment). `// pass @jsx through` is prose. */
-const JSX_PRAGMA = /(?:^|\n)[ \t]*\*?[ \t]*@(jsx|jsxFrag|jsxImportSource|jsxRuntime)[ \t]+([^\s*]+)/g;
+/**
+ * Like Babel: the pragma starts a comment line (after `*` in a block comment). `// pass @jsx through` is prose.
+ * It says `(?:\*[ \t]*)?` because `\*?[ \t]*` puts two `[ \t]*` side by side, which makes a long run of
+ * spaces quadratic.
+ */
+const JSX_PRAGMA = /(?:^|\n)[ \t]*(?:\*[ \t]*)?@(jsx|jsxFrag|jsxImportSource|jsxRuntime)[ \t]+([^\s*]+)/g;
 
 /** `@jsx h`, `@jsxFrag Fragment`, `@jsxImportSource @emotion/react`, `@jsxRuntime classic`. */
 const jsxPragmas = (result: ParseResult) => {
@@ -495,6 +502,202 @@ const jsxPragmas = (result: ParseResult) => {
     for (const m of matches) found[m[1]] = m[2];
   }
   return { found, text: texts.join('\n') };
+};
+
+type Comment = ParseResult['comments'][number];
+
+/**
+ * Comments that change what a tool makes of the code: minifier annotations such as `#__PURE__`,
+ * bundler hints such as `webpackChunkName` and `@vite-ignore`, legal comments, TypeScript
+ * directives, test environments and coverage hints. `//!`, `/*!` and `///` comments count too.
+ */
+const SIGNIFICANT_COMMENT =
+  /[@#]__[A-Z_]+__|@(?:license|preserve|internal|refresh|vite-ignore|ts-ignore|ts-expect-error|ts-nocheck|ts-check|jest-environment|vitest-environment)\b|\b(?:webpack|turbopack)[A-Z]|\b(?:istanbul|c8|v8)[ \t]+ignore\b|\bnode:coverage[ \t]|^[#@][ \t]*source(?:Mapping)?URL=|^\s*(?:GraphQL|graphql|gql)\s*$/;
+const JSX_PRAGMA_LINE = new RegExp(JSX_PRAGMA.source);
+const LINE_BREAK = /[\n\r\u2028\u2029]/;
+const isLineBreak = (c: number) => c === 10 || c === 13 || c === 0x2028 || c === 0x2029;
+/** Matches what `\s` matches, ECMAScript white space and line terminators. */
+const isSpace = (c: number) =>
+  c === 32 ||
+  (c >= 9 && c <= 13) ||
+  (c >= 0xa0 &&
+    (c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff));
+/** `( ) [ ] { } , ;` never join a neighbour into another token, so a space beside them means nothing. */
+const isTight = (c: number) => c === 40 || c === 41 || c === 91 || c === 93 || c === 123 || c === 125 || c === 44 || c === 59;
+const JS_FILE = /\.[cm]?jsx?$/;
+
+const isSignificant = (comment: Comment, jsdoc: boolean) =>
+  comment.value.startsWith('!') ||
+  (comment.type === 'Line' && comment.value.startsWith('/')) ||
+  (jsdoc && comment.type === 'Block' && comment.value.startsWith('*') && comment.value.includes('@')) ||
+  SIGNIFICANT_COMMENT.test(comment.value) ||
+  JSX_PRAGMA_LINE.test(comment.value);
+
+/**
+ * The text a JSX compiler keeps of a JSX text child: whitespace touching a line break goes,
+ * lines left empty go, the rest join with a space. Babel's `cleanJSXElementLiteralChild`
+ * and TypeScript agree on this. Tabs stay, since Babel turns them into spaces and TypeScript
+ * does not.
+ */
+const jsxText = (raw: string): string => {
+  const lines = raw.split(/\r\n|\n|\r/);
+  if (lines.length === 1) return raw;
+  const kept: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let from = 0;
+    let to = line.length;
+    if (i > 0) while (from < to && (line[from] === ' ' || line[from] === '\t')) from++;
+    if (i < lines.length - 1) while (to > from && (line[to - 1] === ' ' || line[to - 1] === '\t')) to--;
+    if (from < to) kept.push(line.slice(from, to));
+  }
+  return kept.join(' ');
+};
+
+/** A stretch of source that fragment text does not copy as it is. */
+interface Mark {
+  start: number;
+  end: number;
+  /** `raw` copies the source, `space` stands for whitespace, `text` replaces it with `text`. */
+  kind: 'raw' | 'space' | 'text';
+  text?: string;
+  newline?: boolean;
+}
+
+/** Index of the first item that starts at or after `pos`. */
+const firstFrom = (items: Array<{ start: number }>, pos: number) => {
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (items[mid].start < pos) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+};
+
+/**
+ * Where fragment text leaves the source: literals and significant comments stay as written,
+ * other comments become whitespace, JSX text becomes what the compiler keeps of it, and JSX
+ * children that hold nothing but a comment go. Iterative, like `walk`.
+ */
+const textMarks = (source: string, program: N, comments: Comment[], significant: boolean[]): Mark[] => {
+  const marks: Mark[] = [];
+  const kept = comments.filter((_, i) => significant[i]);
+  comments.forEach((c, i) =>
+    marks.push(significant[i] ? { start: c.start, end: c.end, kind: 'raw' } : { start: c.start, end: c.end, kind: 'space', newline: c.type === 'Block' && LINE_BREAK.test(c.value) })
+  );
+  const hashbang = node(program.hashbang);
+  if (hashbang) marks.push({ start: hashbang.start, end: hashbang.end, kind: 'raw' });
+  const cleaned = (n: N | undefined) => (n?.type === 'JSXText' ? jsxText(source.slice(n.start, n.end)) : undefined);
+  const holdsSignificant = (n: N) => (kept[firstFrom(kept, n.start)]?.start ?? Infinity) < n.end;
+  /** An empty child such as `{}`, or one with only a comment in it, compiles to nothing. */
+  const blank = (n: N | undefined) =>
+    n?.type === 'JSXExpressionContainer' && node(n.expression)?.type === 'JSXEmptyExpression' && !holdsSignificant(n);
+  const blanks = (children: N[]) => {
+    for (let i = 0; i < children.length; i++) {
+      if (!blank(children[i])) continue;
+      let j = i;
+      while (j < children.length && (blank(children[j]) || cleaned(children[j]) === '')) j++;
+      // `a{/* note */}b` compiles to two texts and `ab` to one, so the braces stay between texts.
+      const text = cleaned(children[i - 1]) && cleaned(children[j]) ? '{}' : '';
+      for (let k = i; k < j; k++) if (blank(children[k])) marks.push({ start: children[k].start, end: children[k].end, kind: 'text', text });
+      i = j - 1;
+    }
+  };
+  const stack: unknown[] = [program];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (Array.isArray(value)) {
+      for (let i = value.length - 1; i >= 0; i--) stack.push(value[i]);
+      continue;
+    }
+    if (!isNode(value)) continue;
+    if (value.type === 'Literal' || value.type === 'TemplateElement') {
+      marks.push({ start: value.start, end: value.end, kind: 'raw' });
+      continue;
+    }
+    if (value.type === 'JSXText') {
+      marks.push({ start: value.start, end: value.end, kind: 'text', text: cleaned(value) });
+      continue;
+    }
+    if (value.type === 'JSXElement' || value.type === 'JSXFragment') blanks(nodes(value.children));
+    const keys = visitorKeys[value.type];
+    if (!keys) continue;
+    for (let i = keys.length - 1; i >= 0; i--) stack.push(value[keys[i]]);
+  }
+  marks.sort((a, b) => a.start - b.start || b.end - a.end);
+  // A comment inside a blank JSX child goes with it.
+  const out: Mark[] = [];
+  let end = -1;
+  for (const mark of marks) {
+    if (mark.start < end) continue;
+    out.push(mark);
+    end = mark.end;
+  }
+  return out;
+};
+
+/**
+ * Builds fragment text, the source from `start` to `end` without insignificant comments. Each
+ * run of whitespace outside literals becomes one line break if it holds one, since automatic
+ * semicolon insertion reads them (`return\nx`). Otherwise it becomes one space, or nothing
+ * beside a bracket, comma or semicolon.
+ */
+const cleaner = (source: string, marks: Mark[]) => (start: number, end: number): string => {
+  let out = '';
+  let pending = '';
+  const space = (newline: boolean) => {
+    pending = newline || pending === '\n' ? '\n' : ' ';
+  };
+  const token = (text: string) => {
+    if (out && (pending === '\n' || (pending === ' ' && !isTight(out.charCodeAt(out.length - 1)) && !isTight(text.charCodeAt(0))))) out += pending;
+    pending = '';
+    out += text;
+  };
+  const gap = (from: number, to: number) => {
+    let i = from;
+    while (i < to) {
+      const first = i;
+      if (isSpace(source.charCodeAt(i))) {
+        let newline = false;
+        for (; i < to && isSpace(source.charCodeAt(i)); i++) newline ||= isLineBreak(source.charCodeAt(i));
+        space(newline);
+      } else {
+        while (i < to && !isSpace(source.charCodeAt(i))) i++;
+        token(source.slice(first, i));
+      }
+    }
+  };
+  let pos = start;
+  for (let i = firstFrom(marks, start); i < marks.length && marks[i].start < end; i++) {
+    const mark = marks[i];
+    gap(pos, mark.start);
+    if (mark.kind === 'raw') token(source.slice(mark.start, mark.end));
+    else if (mark.kind === 'space') space(mark.newline === true);
+    else if (mark.text) token(mark.text);
+    pos = mark.end;
+  }
+  gap(pos, end);
+  return out;
+};
+
+interface SourceText {
+  /** Fragment text for a span, see `cleaner`. */
+  clean: (start: number, end: number) => string;
+  /** Significant comments, which count wherever they are. */
+  significant: Comment[];
+}
+
+const sourceText = (file: string, source: string, result: ParseResult, options: ParseOptions): SourceText => {
+  // A package file changes only with the package, so its text can stay as it is.
+  if (isInNodeModules(file)) return { clean: (start, end) => source.slice(start, end), significant: [] };
+  const comments = result.comments ?? [];
+  // JSDoc tags are types in a JavaScript file TypeScript checks.
+  const jsdoc = JS_FILE.test(file) && (options.checkJs === true || comments.some(c => /@ts-check\b/.test(c.value)));
+  const significant = comments.map(c => isSignificant(c, jsdoc));
+  const marks = textMarks(source, result.program as unknown as N, comments, significant);
+  return { clean: cleaner(source, marks), significant: comments.filter((_, i) => significant[i]) };
 };
 
 export const parseModule = (file: string, source: string, options: ParseOptions = {}): ParseOutcome => {
@@ -510,7 +713,8 @@ export const parseModule = (file: string, source: string, options: ParseOptions 
   jsxFactories = classic ? [pragmas.found.jsx ?? options.jsxFactory ?? 'React.createElement'] : undefined;
   jsxFragmentFactories = classic ? [pragmas.found.jsxFrag ?? options.jsxFragmentFactory ?? 'React.Fragment'] : undefined;
   try {
-    return analyze(source, result, options, { classic, importSource: pragmas.found.jsxImportSource, text: pragmas.text });
+    const text = sourceText(file, source, result, options);
+    return analyze(source, text, result, options, { classic, importSource: pragmas.found.jsxImportSource, text: pragmas.text });
   } catch (error) {
     // A stack overflow on pathological input: hash the whole file and keep its static imports.
     return { module: parseErrorFallback(source, result), errors: [`cannot analyze (${(error as Error).message})`] };
@@ -531,6 +735,7 @@ const isFreshValue = (init: unknown): boolean => {
 
 const analyze = (
   source: string,
+  text: SourceText,
   result: ParseResult,
   options: ParseOptions,
   jsx: { classic: boolean; importSource?: string; text: string }
@@ -544,7 +749,7 @@ const analyze = (
       module: {
         kind: 'opaque',
         reason: 'commonjs',
-        content: source,
+        content: text.clean(0, source.length),
         specifiers: [...usage.dynamic, ...usage.types],
         contexts: [...usage.contexts],
         paths: [...usage.paths],
@@ -554,7 +759,13 @@ const analyze = (
     };
   }
 
-  const slice = (n: N) => source.slice(n.start, n.end);
+  /** Spans fragment text came from, so significant comments outside them can count on their own. */
+  const spans: Array<{ start: number; end: number }> = [];
+  const span = (start: number, end: number) => {
+    spans.push({ start, end });
+    return text.clean(start, end);
+  };
+  const slice = (n: N) => span(n.start, n.end);
   const imports = new Map<string, ImportBinding>();
   const exports = new Map<string, ExportEntry>();
   const stars: StarExport[] = [];
@@ -574,7 +785,7 @@ const analyze = (
   /** A class with decorators written before `export` starts at the first decorator. */
   const spanOf = (stmt: N, decl: N) => {
     const first = nodes(decl.decorators)[0];
-    return first && first.start < stmt.start ? source.slice(first.start, stmt.end) : slice(stmt);
+    return first && first.start < stmt.start ? span(first.start, stmt.end) : slice(stmt);
   };
 
   /** Decorators and static blocks run when the class is defined, like top-level code (route registration, DI). */
@@ -789,6 +1000,21 @@ const analyze = (
       walk(stmt, decl.usage);
     } else effect(stmt);
   }
+
+  // No fragment holds a `// @ts-expect-error` above an import or a `/*! license */` at the top.
+  spans.sort((a, b) => a.start - b.start);
+  let reach = -1;
+  const covered: Array<{ start: number; end: number }> = [];
+  for (const s of spans) {
+    if (s.start < reach) covered[covered.length - 1].end = Math.max(reach, s.end);
+    else covered.push({ ...s });
+    reach = Math.max(reach, s.end);
+  }
+  const loose = text.significant.filter(c => {
+    const i = firstFrom(covered, c.start + 1) - 1;
+    return !(i >= 0 && c.end <= covered[i].end) && !JSX_PRAGMA_LINE.test(c.value);
+  });
+  if (loose.length > 0) effects.push({ pos: -1, text: loose.map(c => source.slice(c.start, c.end)).join('\n') });
 
   effects.sort((a, b) => a.pos - b.pos);
   return {

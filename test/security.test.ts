@@ -1038,6 +1038,11 @@ describe('comments are stripped in linear time', () => {
     finished(cli(['hash', '-C', dir]));
   });
 
+  test('a script whose comment holds 1,000,000 spaces finishes', () => {
+    const dir = app({ ...project, 'src/index.ts': `/*\n${' '.repeat(1_000_000)}x */\nexport const x = 1;\n` });
+    finished(cli(['hash', '-C', dir]));
+  });
+
   const vite = { 'package.json': { name: 'site', private: true, devDependencies: { vite: '6.0.0' } }, 'src/main.ts': 'export const main = 1;\n', 'src/old.ts': 'export const old = 1;\n' };
 
   test('an index.html of 250,000 unclosed comment openers finishes', () => {

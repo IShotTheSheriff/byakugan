@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { parseModule, type EsmModule } from '../src/parse.ts';
+import { moduleFragments } from '../src/graph.ts';
+import { parseModule, type EsmModule, type ParseOptions } from '../src/parse.ts';
 
 const esm = (source: string, file = 'x.tsx'): EsmModule => {
   const { module, errors } = parseModule(file, source);
@@ -197,5 +198,72 @@ describe('parseModule', () => {
     assert.deepEqual(paths('assets'), ['cwd ./public']);
     assert.ok(paths('icon').includes('cwd ././favicon.ico'), paths('icon').join());
     assert.deepEqual([...(m.decls.get('computed')?.usage.contexts ?? [])], ['*']);
+  });
+});
+
+// moduleFragments holds the hashes git mode and fingerprints compare, so the pairs below go
+// through it. Each "counts" row is the change that a too lax cleanup would miss.
+describe('fragment text: comments and whitespace', () => {
+  const fragments = (source: string, file: string, options?: ParseOptions) => moduleFragments(parseModule(file, source, options).module);
+  const fn = (body: string) => `export function add(a: number, b: number) {\n${body}\n}\n`;
+  const view = (children: string) => `export const View = () => (\n  <div>\n${children}\n  </div>\n);\n`;
+
+  const ignored: Array<[string, string, string, string?]> = [
+    ['a line comment inside a function', fn('  return a + b;'), fn('  // add them\n  return a + b;')],
+    ['an edited block comment', fn('  /* one */\n  return a + b;'), fn('  /* two\n     lines */\n  return a + b;')],
+    ['a trailing comment', fn('  return a + b;'), fn('  return a + b; // sum')],
+    ['a comment between tokens', fn('  return a + b;'), fn('  return a /* left */ + b;')],
+    ['a comment that labels an argument', 'export const f = () => g(true);\n', 'export const f = () => g(/* force */ true);\n'],
+    ['spaces inside brackets and after commas', 'export const f = (a: number, b: number) => [a, b];\n', 'export const f = ( a: number,b: number ) => [ a,b ];\n'],
+    ['reindenting', fn('  return a + b;'), fn('\t\treturn  a +  b;  ')],
+    ['a doc comment on a class member', 'export class A {\n  m() {}\n}\n', 'export class A {\n  /**\n   * Does m.\n   * @deprecated\n   */\n  m() {}\n}\n'],
+    ['an eslint directive, since lint reads whole files', fn('  return a + b;'), fn('  // eslint-disable-next-line no-console\n  return a + b;')],
+    ['a {/* note */} line between JSX elements', view('    <a />\n    <b />'), view('    <a />\n    {/* note */}\n    <b />')],
+    ['a {/* note */} after JSX text', view('    hello\n    <b />'), view('    hello\n    {/* note */}\n    <b />')],
+    ['reindented JSX text', view('    <p>\n      hello\n      world\n    </p>'), view('    <p>\n        hello\n  world\n    </p>')],
+    ['JSX text lines joined with a space', view('    <p>\n      hello\n      world\n    </p>'), view('    <p>\n      hello world\n    </p>')],
+    ['a comment inside a JSX tag', view('    <a b="1" />'), view('    <a /* why */ b="1" />')],
+    ['a comment after non-ASCII text', "export const s = 'żółw';\n", "export const s = 'żółw'; /* ą */\n"],
+    ['a doc comment in a JS file TypeScript does not check', 'export const f = () => {\n  return 1;\n};\n', 'export const f = () => {\n  /** @type {number} */\n  return 1;\n};\n', 'x.js'],
+    ['a comment in CommonJS', "const a = require('a');\nmodule.exports = a;\n", "// legacy\nconst a = require('a'); // the a\nmodule.exports = a;\n", 'x.cjs'],
+  ];
+  for (const [label, before, after, file = 'x.tsx'] of ignored) {
+    test(`${label} does not count`, () => assert.deepEqual(fragments(after, file), fragments(before, file)));
+  }
+
+  const counted: Array<[string, string, string, string?, ParseOptions?]> = [
+    ['a code change', fn('  return a + b;'), fn('  return a - b;')],
+    ['a line break after return', fn('  return a + b;'), fn('  return\n  a + b;')],
+    ['the space after return', fn('  return a + b;'), fn('  returna + b;')],
+    ['a line break before a brace after return', 'export const f = () => {\n  return {};\n};\n', 'export const f = () => {\n  return\n  {};\n};\n'],
+    ['a multi-line comment after return', fn('  return a + b;'), fn('  return /*\n  */ a + b;')],
+    ['whitespace in a string', "export const s = 'a b';\n", "export const s = 'a  b';\n"],
+    ['whitespace in a template literal', 'export const s = `a ${1} b`;\n', 'export const s = `a ${1}  b`;\n'],
+    ['whitespace in a JSX attribute', view('    <a b="x y" />'), view('    <a b="x  y" />')],
+    ['whitespace in one line of JSX text', view('    <p>hi there</p>'), view('    <p>hi  there</p>')],
+    ['removing {/* note */} between two texts', view('    <p>a{/* note */}b</p>'), view('    <p>ab</p>')],
+    ['a #__PURE__ annotation', 'export const x = make();\n', 'export const x = /* #__PURE__ */ make();\n'],
+    ['a webpack chunk name', "export const load = () => import(/* webpackChunkName: \"a\" */ './a');\n", "export const load = () => import(/* webpackChunkName: \"b\" */ './a');\n"],
+    ['@vite-ignore', 'export const load = (p: string) => import(/* note */ p);\n', 'export const load = (p: string) => import(/* @vite-ignore */ p);\n'],
+    ['@ts-expect-error inside a function', fn('  return a + b;'), fn('  // @ts-expect-error\n  return a + b;')],
+    ['@ts-expect-error in JSX', view('    <a />'), view('    {/* @ts-expect-error */}\n    <a />')],
+    ['a legal comment', fn('  return a + b;'), fn('  /*! keep */\n  return a + b;')],
+    ['a coverage hint', fn('  return a + b;'), fn('  /* istanbul ignore next */\n  return a + b;')],
+    ['@ts-expect-error above an import', "import x from 'x';\nexport const y = x;\n", "// @ts-expect-error untyped\nimport x from 'x';\nexport const y = x;\n"],
+    ['@ts-nocheck at the top', 'export const y = 1;\n', '// @ts-nocheck\nexport const y = 1;\n'],
+    ['@vitest-environment at the top', 'export const y = 1;\n', '/** @vitest-environment jsdom */\nexport const y = 1;\n'],
+    ['a doc comment in a JS file with checkJs', 'export const f = () => {\n  return 1;\n};\n', 'export const f = () => {\n  /** @type {number} */\n  return 1;\n};\n', 'x.js', { checkJs: true }],
+    ['a doc comment above a declaration with checkJs', 'export const n = 1;\n', '/** @type {number} */\nexport const n = 1;\n', 'x.js', { checkJs: true }],
+    ['a doc comment in a JS file with @ts-check', '// @ts-check\nexport const f = () => /** @type {string} */ (1);\n', '// @ts-check\nexport const f = () => /** @type {number} */ (1);\n', 'x.js'],
+    ['a code change in CommonJS', "const a = require('a');\nmodule.exports = a;\n", "const a = require('b');\nmodule.exports = a;\n", 'x.cjs'],
+    ['#__PURE__ in CommonJS', 'module.exports = make();\n', 'module.exports = /* #__PURE__ */ make();\n', 'x.cjs'],
+  ];
+  for (const [label, before, after, file = 'x.tsx', options] of counted) {
+    test(`${label} counts`, () => assert.notDeepEqual(fragments(after, file, options), fragments(before, file, options)));
+  }
+
+  test('a package file keeps its comments, since it changes only with the package', () => {
+    const file = '/repo/node_modules/lib/index.js';
+    assert.notDeepEqual(fragments('export const f = () => {\n  // a\n  return 1;\n};\n', file), fragments('export const f = () => {\n  return 1;\n};\n', file));
   });
 });

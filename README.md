@@ -236,6 +236,22 @@ workflow.
    imports such as `import './polyfill'`, and top-level statements).
    `declare global` and `declare module` blocks form a separate types fragment.
    byakugan records, per declaration, which top-level names it refers to.
+   A fragment's hash leaves out comments, and each run of whitespace outside
+   strings counts as one space or one line break, so editing a comment or
+   reindenting a function changes nothing. A comment that labels an argument,
+   as in `f(/* force */ true)`, changes nothing either. JSX text counts as the compiler
+   keeps it. These comments still count, since they change what a tool does:
+
+   - minifier and bundler hints: `#__PURE__`, `webpackChunkName`, `@vite-ignore`
+   - legal comments: `/*!`, `//!`, `@license`, `@preserve`
+   - TypeScript directives: `@ts-expect-error`, `@ts-ignore`, `@ts-nocheck`, `///`
+   - test environments and coverage hints: `@vitest-environment`, `istanbul ignore`
+   - JSX pragmas such as `@jsxImportSource`
+   - JSDoc tags in JavaScript files that TypeScript checks, with `checkJs` or
+     `// @ts-check`
+
+   Such a comment outside every declaration, like `// @ts-expect-error` above
+   an import, counts with the module's side effects.
 3. **Walk.** A used export leads to its declaration. The declaration leads to
    the names it refers to. An import binding leads to the export of the module
    it resolves to ([oxc-resolver][oxc-resolver], with tsconfig `paths` and
@@ -452,6 +468,9 @@ These cost extra builds:
   so byakugan rewrites `import { partition } from 'lodash'` to
   `lodash/partition`, as Next.js does by default. A default import
   (`import _ from 'lodash'`) uses the whole file.
+- **Some formatting counts.** Spaces beside brackets, commas and semicolons
+  do not, but a statement split over two lines or `a+b` written as `a + b`
+  changes the hash, so a formatter run over a used file usually counts.
 - **Names, not types.** There is no type checker. A local variable that shadows
   an import counts as a use of that import. A declaration reached through
   `import type` counts whole, so a function body change counts even when its
@@ -502,6 +521,12 @@ These can miss a change:
   database, `fetch` in `generateStaticParams`) and environment variables that
   CI sets rather than `.env*` files are not files byakugan can hash. Add them
   to your cache key.
+- **Comments in build output.** A build that keeps comments, such as `tsc` or
+  Rollup without a minifier, emits different files after a comment edit that
+  byakugan reports as unaffected. The code runs the same. Lint and format
+  checks read comments and formatting, and ESLint obeys
+  `// eslint-disable-next-line`. Key such checks on the files under `inputs`,
+  not on the graph.
 - **Declaration order.** Moving `const a = 1` below the code that reads it at
   the top level, or a base class below its subclass, throws at runtime, but
   each declaration's text is unchanged, so nothing counts.
