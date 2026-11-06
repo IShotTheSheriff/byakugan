@@ -4,8 +4,10 @@ byakugan builds the graph of code a TypeScript, React or Next.js app actually
 uses. It goes down to single exports inside barrel files and into npm packages.
 CI can use that graph to skip a build when a change cannot reach the app.
 
-[Knip][knip] answers "what does nothing use?". byakugan asks the opposite
-question, "what exactly does this app use?".
+byakugan is [Knip][knip]'s approach turned around. Knip walks from an app's
+entry files through every import and export and reports what nothing uses.
+byakugan does the same walk and keeps the rest, the exact code the app uses,
+so it can hash it.
 
 ## The problem
 
@@ -622,9 +624,11 @@ environment of that name.
 
 ## Prior art
 
-Knip by Lars Kappert, which byakugan's module graph borrows ideas from, and the
-same oxc parser and resolver that Knip uses. Next.js `modularizeImports` and
-`optimizePackageImports`, which solve the same barrel problem for bundle size.
+Knip by Lars Kappert. byakugan's module graph follows Knip's design, used in
+reverse, and runs on the same oxc parser and resolver that Knip uses.
+
+Next.js `modularizeImports` and `optimizePackageImports`, which solve the same
+barrel problem for bundle size.
 
 ## License
 
