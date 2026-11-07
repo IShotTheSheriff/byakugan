@@ -391,7 +391,7 @@ describe('byakugan.json', () => {
     ['{ "virtual": "virtual:*" }', /"virtual" must be a list of strings/],
     ['{ "entry": ["/src/**"] }', /"entry" holds "\/src\/\*\*"; patterns are relative to the project directory/],
     ['{ "inputs": ["!/tmp/**"] }', /"inputs" holds "!\/tmp\/\*\*"/],
-    ['{ "framework": "nuxt" }', /"framework" must be one of next, vite, react-router, none/],
+    ['{ "framework": "gatsby" }', /"framework" must be one of next, vite, react-router, nuxt, sveltekit, astro, react-native, none/],
     ['{ "jsxImportSource": 5 }', /"jsxImportSource" must be a string/],
     ['{ "modularizeImports": [] }', /"modularizeImports" must be an object/],
   ] as const) {

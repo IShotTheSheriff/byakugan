@@ -29,6 +29,13 @@ export interface ResolverOptions {
   /** tsconfig.json or jsconfig.json to read `paths` from. Default: the nearest tsconfig.json of each file. */
   tsconfig?: string;
   modularizeImports?: Record<string, ModularizeRule>;
+  /** Import aliases (`$lib` -> a directory), tried before tsconfig `paths`. */
+  alias?: Record<string, string[]>;
+  /**
+   * React Native: Metro picks `Button.ios.tsx` over `Button.tsx` per platform, so every platform
+   * variant of a resolved file counts, and packages resolve with the `react-native` condition.
+   */
+  platforms?: string[];
 }
 
 /** Next.js ships this rule by default; it maps `import { partition } from 'lodash'` to `lodash/partition`. */
@@ -37,6 +44,7 @@ export const DEFAULT_MODULARIZE: Record<string, ModularizeRule> = {
 };
 
 const EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.d.ts', '.json'];
+const CODE_EXTENSIONS = EXTENSIONS.filter(e => e !== '.d.ts' && e !== '.json');
 
 const EXTENSION_ALIAS = {
   '.js': ['.js', '.ts', '.tsx', '.d.ts'],
@@ -90,6 +98,7 @@ const applyTransform = (transform: string, member: string) =>
   );
 
 export class Resolver {
+  private platforms: string[];
   private projectResolvers: ResolverFactory[];
   private packageResolvers: ResolverFactory[];
   private styleResolvers: [ResolverFactory, ResolverFactory];
@@ -105,15 +114,19 @@ export class Resolver {
       extensionAlias: EXTENSION_ALIAS,
       mainFields: ['module', 'main'],
       symlinks: true,
+      ...(options.alias && Object.keys(options.alias).length > 0 ? { alias: options.alias } : {}),
     };
     // A package's `exports` picks the first key, in its own order, that the set contains. So
     // `import` and `require` sit in separate sets: with both in one, `{ "require": ..., "import": ... }`
     // resolves an ES import to the CommonJS build.
+    this.platforms = options.platforms ?? [];
+    if (this.platforms.length > 0) base.extensions = [...this.platforms.flatMap(p => CODE_EXTENSIONS.map(e => `.${p}${e}`)), ...EXTENSIONS];
     const sets: Array<{ conditions: string[]; browser?: boolean }> = [
       { conditions: [...extra, 'browser', 'import', 'module', 'default'], browser: true },
       { conditions: [...extra, 'node', 'import', 'module', 'default'] },
       { conditions: [...extra, 'node', 'require', 'default'] },
     ];
+    if (this.platforms.length > 0) sets.unshift({ conditions: [...extra, 'react-native', 'browser', 'import', 'module', 'default'] });
     if (options.reactServer) sets.push({ conditions: [...extra, 'react-server', 'node', 'import', 'module', 'default'] });
     // One set per runtime: a package listing `edge-light` before `workerd` would otherwise hide the Workers build.
     for (const runtime of options.edge ?? []) sets.push({ conditions: [...extra, runtime, 'worker', 'browser', 'import', 'module', 'default'], browser: true });
@@ -208,9 +221,35 @@ export class Resolver {
       const result = external ? resolver.sync(dirname(fromFile), specifier) : resolver.resolveFileSync(fromFile, specifier);
       if (result.path) found.add(result.path);
     }
+    if (this.platforms.length > 0) for (const file of [...found]) for (const variant of this.platformVariants(file)) found.add(variant);
     const files = [...found];
     this.cache.set(cacheKey, files);
     return files;
+  }
+
+  /**
+   * Stems of resolved files that platform variants compete for, such as `src/Button` and
+   * `src/Button.ios`. Deleting `Button.ios.tsx` hands the iOS import to `Button.tsx`, which
+   * the graph already holds, so git mode matches deleted files against these.
+   */
+  readonly variantStems = new Set<string>();
+
+  /** `Button.ios.tsx` -> `Button.tsx`, `Button.android.js` and the rest that exist, in any code extension. */
+  private platformVariants(file: string): string[] {
+    const ext = /\.[cm]?[jt]sx?$/.exec(file)?.[0];
+    if (!ext || file.endsWith('.d.ts')) return [];
+    const stem = file.slice(0, -ext.length).replace(new RegExp(`\\.(?:${this.platforms.join('|')})$`), '');
+    const stems = [stem, ...this.platforms.map(p => `${stem}.${p}`)];
+    if (!isInNodeModules(file)) for (const s of stems) this.variantStems.add(s);
+    const candidates = stems.flatMap(s => CODE_EXTENSIONS.map(e => `${s}${e}`));
+    return candidates.filter(c => {
+      if (c === file) return false;
+      try {
+        return statSync(c).isFile();
+      } catch {
+        return false;
+      }
+    });
   }
 
   /**

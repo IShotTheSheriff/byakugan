@@ -1099,3 +1099,133 @@ describe('comments', () => {
     });
   });
 });
+
+describe('git mode: top-level initializers', () => {
+  const lib = (store: string) =>
+    `import { cva } from 'class-variance-authority';\nimport { createStore } from './store';\nexport const price = (n: number) => n * 2;\nexport const store = ${store};\nexport const variants = cva('a');\n`;
+  const files = {
+    'src/main.ts': "import { price } from './lib';\nconsole.log(price(2));\n",
+    'src/lib.ts': lib("createStore('a')"),
+    'src/store.ts': 'export const createStore = (name: string) => { (globalThis as any)[name] = {}; return name; };\n',
+    ...pkg('class-variance-authority', { type: 'module', main: 'index.js' }, { 'index.js': 'export const cva = a => () => a;\n' }),
+  };
+
+  test('changing a call nobody reads the result of is affected, since it runs with the module', () => {
+    const { result, keys } = compare(files, { 'src/lib.ts': lib("createStore('b')") });
+    assert.equal(result.affected, true);
+    assert.deepEqual(keys, ['src/lib.ts#store']);
+  });
+
+  test('a store nobody reads pulls in the code its initializer calls', () => {
+    const { result } = compare(files, { 'src/store.ts': 'export const createStore = (name: string) => name;\n' });
+    assert.equal(result.affected, true);
+  });
+
+  test('changing an unused cva() call is not affected, since it only builds a value', () => {
+    const { result } = compare(files, { 'src/lib.ts': lib("createStore('a')").replace("cva('a')", "cva('b')") });
+    assert.equal(result.affected, false);
+  });
+
+  test('changing an unused call marked #__PURE__ is not affected', () => {
+    const { result } = compare(
+      { ...files, 'src/lib.ts': lib("/*#__PURE__*/ createStore('a')") },
+      { 'src/lib.ts': lib("/*#__PURE__*/ createStore('b')") }
+    );
+    assert.equal(result.affected, false);
+  });
+
+  test('changing an unused object literal or arrow function is not affected', () => {
+    const base = 'export const price = 1;\nexport const config = { a: [1, 2].map(n => n * 2) };\nexport const later = () => createStore();\n';
+    const { result } = compare(
+      { ...files, 'src/lib.ts': base },
+      { 'src/lib.ts': base.replace('n * 2', 'n * 3').replace('createStore()', 'createStore(1)') }
+    );
+    assert.equal(result.affected, false);
+  });
+
+  test('a callback map() runs right away counts', () => {
+    const base = "import { createStore } from './store';\nexport const price = 1;\nexport const all = ['a'].map(n => createStore(n));\n";
+    const { result } = compare({ ...files, 'src/lib.ts': base }, { 'src/lib.ts': base.replace("['a']", "['b']") });
+    assert.equal(result.affected, true);
+  });
+
+  test('a function passed as a callback runs: map(register) counts', () => {
+    const base = "import { createStore } from './store';\nconst register = (n: string) => createStore(n);\nexport const price = 1;\nexport const all = ['a'].map(register);\n";
+    const counted = compare({ ...files, 'src/lib.ts': base }, { 'src/lib.ts': base.replace("['a']", "['b']") });
+    assert.equal(counted.result.affected, true);
+    const plain = "const register = (n: string) => n;\nexport const price = 1;\nexport const all = ['a'].map(register);\n";
+    const free = compare({ ...files, 'src/lib.ts': plain }, { 'src/lib.ts': plain.replace("['a']", "['b']") });
+    assert.equal(free.result.affected, false, 'a callback that only builds a value is still pure');
+  });
+
+  test('a borrowed method that mutates counts: Array.prototype.push.call', () => {
+    const store = "export const list: string[] = [];\nexport const createStore = (name: string) => name;\n";
+    const base = "import { list } from './store';\nexport const price = 1;\nexport const n = Array.prototype.push.call(list, 'a');\n";
+    const { result } = compare({ ...files, 'src/store.ts': store, 'src/lib.ts': base }, { 'src/lib.ts': base.replace("'a')", "'b')") });
+    assert.equal(result.affected, true);
+    const pure = "export const price = 1;\nexport const n = Array.isArray(['a']);\n";
+    const free = compare({ ...files, 'src/lib.ts': pure }, { 'src/lib.ts': pure.replace("['a']", "['b']") });
+    assert.equal(free.result.affected, false, 'a pure static method is not');
+  });
+
+  test('a static class field that calls a function counts, an unused plain one does not', () => {
+    const base = "import { createStore } from './store';\nexport const price = 1;\nexport class A { static s = createStore('a'); static n = 1; }\n";
+    const counted = compare({ ...files, 'src/lib.ts': base }, { 'src/lib.ts': base.replace("'a'", "'b'") });
+    assert.equal(counted.result.affected, true);
+    const plain = "export const price = 1;\nexport class A { static n = 1; }\n";
+    const free = compare({ ...files, 'src/lib.ts': plain }, { 'src/lib.ts': plain.replace('n = 1', 'n = 2') });
+    assert.equal(free.result.affected, false);
+  });
+});
+
+describe('git mode: declaration order', () => {
+  const lib = 'export const base = 1;\nexport const price = base * 2;\nexport const other = 3;\n';
+  const files = {
+    'src/main.ts': "import { price } from './lib';\nconsole.log(price);\n",
+    'src/lib.ts': lib,
+  };
+
+  test('moving a binding below the initializer that reads it is affected', () => {
+    const { result, keys } = compare(files, { 'src/lib.ts': 'export const price = base * 2;\nexport const base = 1;\nexport const other = 3;\n' });
+    assert.equal(result.affected, true);
+    assert.deepEqual(keys, ['src/lib.ts#price']);
+  });
+
+  test('moving an unrelated declaration is not affected', () => {
+    const { result } = compare(files, { 'src/lib.ts': 'export const other = 3;\nexport const base = 1;\nexport const price = base * 2;\n' });
+    assert.equal(result.affected, false);
+  });
+
+  test('moving a base class below its subclass is affected', () => {
+    const base = 'class A {}\nexport class B extends A {}\n';
+    const { result } = compare(
+      { 'src/main.ts': "import { B } from './lib';\nnew B();\n", 'src/lib.ts': base },
+      { 'src/lib.ts': 'export class B extends A {}\nclass A {}\n' }
+    );
+    assert.equal(result.affected, true);
+  });
+
+  test('moving a function declaration is not affected, since it is hoisted', () => {
+    const base = 'function f() { return 1; }\nexport const price = f();\n';
+    const { result } = compare(
+      { 'src/main.ts': "import { price } from './lib';\nconsole.log(price);\n", 'src/lib.ts': base },
+      { 'src/lib.ts': 'export const price = f();\nfunction f() { return 1; }\n' }
+    );
+    assert.equal(result.affected, false);
+  });
+
+  test('moving a binding below a top-level statement that reads it is affected', () => {
+    const base = 'const x = 1;\nconsole.log(x);\nexport {};\n';
+    const { result } = compare({ 'src/main.ts': "import './lib';\n", 'src/lib.ts': base }, { 'src/lib.ts': 'console.log(x);\nconst x = 1;\nexport {};\n' });
+    assert.equal(result.affected, true);
+  });
+
+  test('a reference inside a function body does not care about order', () => {
+    const base = 'export const price = () => base;\nconst base = 1;\n';
+    const { result } = compare(
+      { 'src/main.ts': "import { price } from './lib';\nconsole.log(price());\n", 'src/lib.ts': base },
+      { 'src/lib.ts': 'const base = 1;\nexport const price = () => base;\n' }
+    );
+    assert.equal(result.affected, false);
+  });
+});

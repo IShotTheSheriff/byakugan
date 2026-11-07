@@ -8,7 +8,7 @@ import { parseJsonc } from './jsonc.ts';
 import type { ParseOptions } from './parse.ts';
 import type { ModularizeRule } from './resolve.ts';
 
-export type Framework = 'next' | 'vite' | 'react-router' | 'none';
+export type Framework = 'next' | 'vite' | 'react-router' | 'nuxt' | 'sveltekit' | 'astro' | 'react-native' | 'none';
 
 /** Contents of `byakugan.json`. Every field is optional. */
 export interface Config {
@@ -36,6 +36,11 @@ export interface Config {
    * for unplugin-icons. Other unresolved imports of project code count as affected.
    */
   virtual?: string[];
+  /**
+   * Environment variables whose values count when live code reads them (globs over names).
+   * Added to the ones the framework inlines at build time, `NEXT_PUBLIC_*` or `VITE_*`.
+   */
+  env?: string[];
 }
 
 export interface Project {
@@ -71,6 +76,8 @@ export interface Project {
   styleGlobals: string[];
   /** A Cloudflare Workers config exists. */
   workers: boolean;
+  /** Import aliases the framework sets up, such as SvelteKit's `$lib`, as absolute directories. */
+  aliases: Record<string, string[]>;
   /** Candidate paths for `specifier` under tsconfig `paths` and `baseUrl`. */
   aliasTargets(specifier: string): string[];
   /** Candidate paths for `specifier` under tsconfig `paths` only. */
@@ -174,6 +181,40 @@ const NEXT_PACKAGES = [
 ];
 
 const VITE_PACKAGES = ['vite', 'react', 'react-dom', 'typescript', 'tailwindcss', '@tailwindcss/vite', 'postcss', 'autoprefixer', 'sass'];
+const NUXT_PACKAGES = ['nuxt', 'vue', 'vue-router', 'typescript', 'vite', 'postcss', 'sass', 'tailwindcss'];
+const SVELTEKIT_PACKAGES = ['@sveltejs/kit', 'svelte', 'vite', '@sveltejs/vite-plugin-svelte', 'typescript', 'postcss', 'sass', 'tailwindcss'];
+const REACT_NATIVE_PACKAGES = ['react-native', 'react', 'expo', 'expo-router', 'typescript', 'metro', '@expo/metro-config', 'babel-preset-expo', '@react-native/babel-preset'];
+const ASTRO_PACKAGES = ['astro', 'vite', 'typescript', 'postcss', 'sass', 'tailwindcss'];
+/** Code a component framework compiles: its own files plus scripts. */
+const COMPONENT_CODE = '{vue,svelte,astro,js,jsx,ts,tsx,mjs,cjs,mts,cts}';
+
+/**
+ * Directories a framework generates on install or build (`nuxt prepare`, `svelte-kit sync`).
+ * The app's tsconfig extends a file in them, so git mode skips them like `generated` files.
+ */
+export const FRAMEWORK_GENERATED: Partial<Record<Framework, string[]>> = {
+  nuxt: ['.nuxt/**', '.output/**'],
+  sveltekit: ['.svelte-kit/**'],
+  astro: ['.astro/**'],
+  'react-native': ['.expo/**'],
+};
+
+/** Aliases a framework defines in a tsconfig it generates, for runs before that file exists. */
+const frameworkAliases = (framework: Framework, dir: string): Record<string, string[]> => {
+  if (framework === 'sveltekit') return { $lib: [join(dir, 'src/lib')] };
+  if (framework === 'nuxt') {
+    const src = existsSync(join(dir, 'app', 'app.vue')) || existsSync(join(dir, 'app', 'pages')) ? join(dir, 'app') : dir;
+    return { '~': [src], '@': [src], '~~': [dir], '@@': [dir] };
+  }
+  return {};
+};
+
+/** Modules a framework provides at build time, which no file backs. */
+export const FRAMEWORK_VIRTUAL: Partial<Record<Framework, string[]>> = {
+  nuxt: ['#*', '#*/**'],
+  sveltekit: ['$app/**', '$env/**', '$service-worker'],
+  astro: ['astro:*', 'astro:*/**'],
+};
 
 /** Browser targets come from caniuse-lite data, a transitive dependency nobody declares. */
 const BROWSER_DATA_USERS = ['autoprefixer', 'postcss-preset-env', 'browserslist', '@babel/preset-env'];
@@ -533,9 +574,17 @@ export const loadProject = (options: LoadProjectOptions = {}): Project => {
       ? 'react-router'
       : ownDeps.next || has('next')
         ? 'next'
-        : ownDeps.vite || has('vite')
-          ? 'vite'
-          : 'none');
+        : ownDeps.nuxt || has('nuxt')
+          ? 'nuxt'
+          : ownDeps['@sveltejs/kit'] || has('svelte')
+            ? 'sveltekit'
+            : ownDeps.astro || has('astro')
+              ? 'astro'
+              : ownDeps['react-native'] || ownDeps.expo
+                ? 'react-native'
+                : ownDeps.vite || has('vite')
+                  ? 'vite'
+                  : 'none');
 
   const entryPatterns = [...TOOL_CONFIGS];
   const inputPatterns = [...TOOL_INPUTS];
@@ -574,6 +623,51 @@ export const loadProject = (options: LoadProjectOptions = {}): Project => {
     );
     inputPatterns.push('public/**');
     packages.push(...VITE_PACKAGES, ...Object.keys(deps).filter(d => /^(@vitejs\/|@react-router\/|@remix-run\/|react-router$)/.test(d)));
+  } else if (framework === 'nuxt') {
+    // Nuxt 4 keeps the app in `app/`. Components, composables and utils are auto-imported, so all of them count.
+    const src = existsSync(join(dir, 'app')) && (existsSync(join(dir, 'app', 'app.vue')) || existsSync(join(dir, 'app', 'pages'))) ? 'app/' : '';
+    entryPatterns.push(
+      `${src}{app,error}.vue`,
+      `${src}app.config.${CODE}`,
+      `${src}{pages,layouts,components,composables,utils,plugins,middleware}/**/*.${COMPONENT_CODE}`,
+      `{server,shared,modules}/**/*.${CODE}`,
+      `nuxt.config.${CONFIG_EXT}`
+    );
+    inputPatterns.push('public/**');
+    // @nuxt/content builds pages from the files in content/.
+    if ('@nuxt/content' in deps) inputPatterns.push('content/**');
+    packages.push(...NUXT_PACKAGES, ...Object.keys(deps).filter(d => d.startsWith('@nuxt/') || d.startsWith('@nuxtjs/')));
+  } else if (framework === 'sveltekit') {
+    entryPatterns.push(
+      `src/routes/**/*.${COMPONENT_CODE}`,
+      `src/hooks.${CODE}`,
+      `src/hooks.{server,client,universal}.${CODE}`,
+      `src/params/**/*.${CODE}`,
+      `src/service-worker.${CODE}`,
+      `src/service-worker/index.${CODE}`,
+      'svelte.config.{js,mjs,ts}',
+      `vite.config.${CONFIG_EXT}`
+    );
+    inputPatterns.push('src/app.html', 'src/error.html', 'static/**');
+    packages.push(...SVELTEKIT_PACKAGES, ...Object.keys(deps).filter(d => d.startsWith('@sveltejs/adapter-')));
+  } else if (framework === 'astro') {
+    entryPatterns.push(
+      `src/pages/**/*.{astro,md,mdx,html,js,ts}`,
+      `src/middleware.${CODE}`,
+      `src/middleware/index.${CODE}`,
+      `src/content.config.${CODE}`,
+      `src/content/config.${CODE}`,
+      `astro.config.${CONFIG_EXT}`
+    );
+    inputPatterns.push('public/**', 'src/content/**');
+    packages.push(...ASTRO_PACKAGES, ...Object.keys(deps).filter(d => d.startsWith('@astrojs/')));
+  } else if (framework === 'react-native') {
+    // Expo Router loads every file under app/ by convention; without it, index.js or App.tsx is the entry.
+    if ('expo-router' in deps) entryPatterns.push(...both(`app/**/*.${CODE}`));
+    entries.push(...manifestEntries(dir, manifest));
+    entryPatterns.push(`{index,App}.${CODE}`, `app.config.${CONFIG_EXT}`, `metro.config.${CONFIG_EXT}`);
+    inputPatterns.push('app.json', 'eas.json');
+    packages.push(...REACT_NATIVE_PACKAGES);
   } else if (!config.entry?.length) {
     entries.push(...manifestEntries(dir, manifest));
     entryPatterns.push(...both(`{index,main,server,app}.${CODE}`));
@@ -633,7 +727,11 @@ export const loadProject = (options: LoadProjectOptions = {}): Project => {
     root,
     repo: repo ?? root,
     framework,
-    config,
+    config: {
+      ...config,
+      generated: [...(config.generated ?? []), ...(FRAMEWORK_GENERATED[framework] ?? [])],
+      virtual: [...(config.virtual ?? []), ...(FRAMEWORK_VIRTUAL[framework] ?? [])],
+    },
     entries: [...new Set(entries)].sort(),
     inputs: [...new Set(inputs)].sort(),
     inputPatterns,
@@ -657,6 +755,7 @@ export const loadProject = (options: LoadProjectOptions = {}): Project => {
     styleLoadPaths,
     styleGlobals: sassGlobals(nextConfig + viteConfig),
     workers: workers.found,
+    aliases: frameworkAliases(framework, dir),
     aliasTargets,
     pathTargets,
   };
@@ -672,8 +771,8 @@ const sassGlobals = (text: string): string[] => {
   return [...new Set(out)];
 };
 
-const LIST_FIELDS = ['entry', 'inputs', 'packages', 'conditions', 'generated', 'virtual'] as const;
-const FRAMEWORKS = ['next', 'vite', 'react-router', 'none'];
+const LIST_FIELDS = ['entry', 'inputs', 'packages', 'conditions', 'generated', 'virtual', 'env'] as const;
+const FRAMEWORKS = ['next', 'vite', 'react-router', 'nuxt', 'sveltekit', 'astro', 'react-native', 'none'];
 
 /** byakugan.json in the shape the tool expects. A string where a list belongs would spread into one glob per character. */
 const checkConfig = (file: string, value: unknown): Config => {

@@ -6,6 +6,8 @@ import { globMatcher, safeGlob } from './glob.ts';
 import { parseJsonc } from './jsonc.ts';
 import {
   GLOB_SEPARATOR,
+  componentModule,
+  componentParts,
   mdxModule,
   parseModule,
   type EsmModule,
@@ -20,6 +22,8 @@ import { findStyleFile, isInNodeModules, packageNameOf, Resolver, styleCandidate
 import { isTailwindRoot, runTailwind, tailwindFallbackFiles, type TailwindRequest, type TailwindResult } from './tailwind.ts';
 
 const JS_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts']);
+/** Single-file components: a template plus `<script>` and `<style>` blocks. */
+const COMPONENT_EXTENSIONS = new Set(['.vue', '.svelte', '.astro']);
 export const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
 const SEP = '\u0000';
 /** Marker export name: every export of the module but `default` matters, because an `export *` that is used whole passes them on. */
@@ -256,6 +260,20 @@ export const loadModule = (file: string, content: Buffer | string, options?: Par
   const ext = extname(file);
   if (JS_EXTENSIONS.has(ext)) return parseModule(file, content.toString(), options);
   if (ext === '.mdx' || ext === '.md') return { module: mdxModule(content.toString()), errors: [] };
+  if (COMPONENT_EXTENSIONS.has(ext)) {
+    const source = content.toString();
+    const parts = componentParts(file, source);
+    const errors: string[] = [];
+    const scripts = parts.scripts.map(s => {
+      const outcome = parseModule(`${file}.script${s.ext}`, s.code, options);
+      errors.push(...outcome.errors);
+      return { module: outcome.module, code: s.code };
+    });
+    const styles = parts.styles.map(s => styleReferences(`${file}.style${s.ext}`, s.code));
+    const module = componentModule(file, source, scripts, styles.flatMap(s => s.specifiers));
+    module.missing = styles.flatMap(s => s.missing);
+    return { module, errors };
+  }
   const refs = STYLE_EXTENSIONS.has(ext) ? styleReferences(file, content.toString()) : { specifiers: [], missing: [] };
   return { module: { kind: 'opaque', reason: 'asset', content, specifiers: refs.specifiers, missing: refs.missing, jsx: false }, errors: [] };
 };
@@ -327,6 +345,10 @@ export class UsageGraph {
   readonly live = new Map<string, LiveFragment>();
   /** Graph node -> the node that reached it first (BFS, so chains are shortest). */
   readonly parents = new Map<string, string | null>();
+  /** Graph node -> every node that reached it. `entriesReaching` walks it backwards. */
+  readonly reachedFrom = new Map<string, Set<string>>();
+  /** Live fragment key -> every node that made it live. */
+  readonly fragmentVias = new Map<string, Set<string>>();
   readonly unresolved: Unresolved[] = [];
   private unresolvedByKey = new Map<string, Unresolved>();
   readonly warnings: string[] = [];
@@ -334,11 +356,6 @@ export class UsageGraph {
   readonly edges = new Map<string, Map<string, Set<string>>>();
   /** npm package name -> names imported from project code. */
   readonly packageImports = new Map<string, Set<string>>();
-  /**
-   * Where computed imports and file paths point: directories read whole, `import()` patterns
-   * as absolute-path matchers, and referenced paths that do not exist. Git mode checks deleted
-   * files against them, since a deleted file is no longer in the graph.
-   */
   /**
    * Paths whose deletion git mode must count: directories read whole (`trees`), computed import
    * patterns (`contexts`), named paths that do not exist (`missing`), and `shadowed` stems, alias
@@ -356,6 +373,10 @@ export class UsageGraph {
   readonly tailwindMembers: Record<string, string[]> = {};
   /** Files imported with `?raw`: their exact text ends up in the bundle. */
   readonly rawFiles = new Set<string>();
+  /** Environment variables project code reads by name -> the node that read one first. */
+  readonly env = new Map<string, Set<string>>();
+  /** Variables the framework inlines whatever their name, such as SvelteKit's `$env/static/private`. */
+  private inlinedEnv = new Set<string>();
   readonly parseOptions: ParseOptions;
   unresolvedInPackages = 0;
 
@@ -381,6 +402,8 @@ export class UsageGraph {
         edge: [...(project.framework === 'next' ? (['edge-light'] as const) : []), ...(project.workers ? (['workerd'] as const) : [])],
         tsconfig: project.tsconfig,
         modularizeImports: project.config.modularizeImports,
+        alias: project.aliases,
+        platforms: project.framework === 'react-native' ? ['ios', 'android', 'native', 'web'] : undefined,
       });
   }
 
@@ -392,6 +415,8 @@ export class UsageGraph {
     this.useTailwind();
     this.drain();
     this.useWorkspaceManifests();
+    this.useEnv();
+    for (const stem of this.resolver.variantStems) this.patterns.shadowed.add(stem);
     for (const u of this.unresolved) {
       if (!this.isProjectImport(u)) continue;
       this.warn(
@@ -400,6 +425,42 @@ export class UsageGraph {
       );
     }
     return this;
+  }
+
+  /** Name globs of the environment variables whose values count: the ones the framework inlines, plus `env`. */
+  envPatterns(): string[] {
+    const framework = this.project.framework;
+    const inlined =
+      framework === 'next'
+        ? ['NEXT_PUBLIC_*']
+        : framework === 'vite' || framework === 'react-router'
+          ? ['VITE_*']
+          : framework === 'sveltekit' || framework === 'astro'
+            ? ['PUBLIC_*']
+            : framework === 'react-native'
+              ? ['EXPO_PUBLIC_*']
+              : [];
+    return [...inlined, ...(this.project.config.env ?? [])];
+  }
+
+  /** Values of the environment variables live code reads, when `envPatterns` names them. */
+  private useEnv() {
+    const matchers = this.envPatterns().map(p => wildcardMatcher(p, '*'));
+    const counts = (name: string) => this.inlinedEnv.has(name) || matchers.some(match => match(name));
+    // `import.meta.env` read whole holds every exposed variable that is set.
+    const whole = this.env.get('*');
+    if (whole) for (const name of Object.keys(process.env)) if (counts(name)) for (const via of whole) this.readEnv(name, via);
+    for (const [name, vias] of [...this.env].sort(([a], [b]) => (a < b ? -1 : 1))) {
+      if (name === '*' || !counts(name)) continue;
+      const value = process.env[name];
+      for (const via of vias) this.markKey(`env:${name}`, '', hashOf(value === undefined ? '\0unset' : `=${value}`), via);
+    }
+  }
+
+  private readEnv(name: string, via: string) {
+    const vias = this.env.get(name);
+    if (vias) vias.add(via);
+    else this.env.set(name, new Set([via]));
   }
 
   /**
@@ -685,7 +746,7 @@ export class UsageGraph {
     if (cached) return cached;
     let module: ModuleInfo;
     const outside = !this.inside(file);
-    const read = outside ? undefined : readRegular(file, JS_EXTENSIONS.has(extname(file)) || STYLE_EXTENSIONS.has(extname(file)));
+    const read = outside ? undefined : readRegular(file, JS_EXTENSIONS.has(extname(file)) || STYLE_EXTENSIONS.has(extname(file)) || COMPONENT_EXTENSIONS.has(extname(file)));
     if (outside) {
       module = { kind: 'opaque', reason: 'asset', content: '', specifiers: [], jsx: false };
     } else if (read === undefined) {
@@ -735,6 +796,11 @@ export class UsageGraph {
   }
 
   private enqueue(id: string, via: string | null) {
+    if (via !== null) {
+      const from = this.reachedFrom.get(id);
+      if (from) from.add(via);
+      else this.reachedFrom.set(id, new Set([via]));
+    }
     if (this.parents.has(id)) return;
     const { file } = parseNodeId(id);
     if (!this.inside(file)) {
@@ -752,6 +818,9 @@ export class UsageGraph {
   }
 
   private markKey(key: string, file: string, hash: string, via: string) {
+    const vias = this.fragmentVias.get(key);
+    if (vias) vias.add(via);
+    else this.fragmentVias.set(key, new Set([via]));
     const existing = this.live.get(key);
     if (!existing) {
       this.live.set(key, { key, file, hash, via });
@@ -876,6 +945,14 @@ export class UsageGraph {
 
   private useImport(from: string, specifier: string, imported: string, type: boolean, via: string) {
     if (this.resolver.isBuiltin(specifier)) return;
+    // SvelteKit inlines `import { PUBLIC_API } from '$env/static/public'` (and `/private`) at build time.
+    if (this.project.framework === 'sveltekit' && /^\$env\/static\/(public|private)$/.test(specifier)) {
+      if (!type && imported !== '*' && imported !== 'default' && !isInNodeModules(from)) {
+        this.readEnv(imported, via);
+        this.inlinedEnv.add(imported);
+      }
+      return;
+    }
     const query = specifier.indexOf('?');
     if (query > 0 && !type) {
       // Vite `?url`, `?raw`, `?inline`, `?worker`: the file is used whole, whatever it exports.
@@ -884,10 +961,13 @@ export class UsageGraph {
       for (const target of this.resolveOrRecord(specifier.slice(0, query), from)) {
         this.recordEdge(from, target, '*');
         this.enqueue(nodeId('S', target, '*'), via);
-        if (raw && JS_EXTENSIONS.has(extname(target)) && !this.rawFiles.has(target)) {
-          this.rawFiles.add(target);
-          const read = readRegular(target, true);
-          if (read && 'content' in read) this.markLive(target, '<raw>', read.content, via);
+        if (raw && JS_EXTENSIONS.has(extname(target))) {
+          // Read once; a second importer still joins the fragment's vias, for `--each`.
+          if (!this.rawFiles.has(target)) {
+            this.rawFiles.add(target);
+            const read = readRegular(target, true);
+            if (read && 'content' in read) this.markLive(target, '<raw>', read.content, via);
+          } else this.fragmentVias.get(fragmentKey(this.fileKey(target), '<raw>'))?.add(via);
         }
       }
       return;
@@ -1013,6 +1093,7 @@ export class UsageGraph {
     const external = isInNodeModules(from);
     if (kind === 'glob') return this.useGlob(from, path.split(GLOB_SEPARATOR), via);
     if (external && kind !== 'file') return;
+    if (kind === 'alias') return this.useAliasPath(from, path, via);
     const tree = kind === 'file-tree' || kind === 'cwd-tree';
     const bases = kind === 'rel' ? [dirname(from), this.project.dir] : kind.startsWith('cwd') ? [this.project.dir] : [dirname(from)];
     for (const base of bases) {
@@ -1039,6 +1120,18 @@ export class UsageGraph {
       return;
     }
     if (!external) for (const base of bases) this.patterns.missing.add(resolve(base, path));
+  }
+
+  /** `'~/assets/main.css'`: resolved like an import, recorded as missing when no alias target has it. */
+  private useAliasPath(from: string, path: string, via: string) {
+    const found = this.resolver.resolve(path, from).filter(t => !isInNodeModules(t));
+    if (found.length > 0) {
+      for (const target of found) if (this.inside(target)) this.useFile(from, target, via);
+      return;
+    }
+    const slash = path.indexOf('/');
+    const targets = [...(this.project.aliases[path.slice(0, slash)] ?? []).map(d => resolve(d, path.slice(slash + 1))), ...this.project.pathTargets(path)];
+    for (const target of targets) this.patterns.missing.add(target);
   }
 
   /** Vite `import.meta.glob`. A leading `/` is the project root, as in Vite; `!` excludes. */
@@ -1106,6 +1199,7 @@ export class UsageGraph {
     for (const specifier of usage.dynamic) this.useImport(file, specifier, '*', typeOnly, via);
     for (const specifier of usage.types) this.useImport(file, specifier, '*', true, via);
     if (typeOnly) return;
+    if (!isInNodeModules(file)) for (const name of usage.env) this.readEnv(name, via);
     for (const pattern of usage.contexts) this.useContext(file, pattern, via);
     for (const path of usage.paths) this.usePath(file, path, via);
   }
@@ -1127,6 +1221,8 @@ export class UsageGraph {
           if (!external) this.warn(`${this.fileKey(file)}: refers to a file outside the repository, so it is not read`);
         } else this.useImport(file, specifier, '*', false, via);
       }
+      for (const i of module.imports ?? []) this.useImport(file, i.source, i.name, i.type, via);
+      if (!external) for (const name of module.env ?? []) this.readEnv(name, via);
       for (const missing of module.missing ?? []) this.patterns.missing.add(missing);
       if (!external && /\.(scss|sass|less)$/.test(file)) for (const specifier of this.project.styleGlobals) this.useStyleGlobal(file, specifier, via);
       for (const pattern of module.contexts ?? []) this.useContext(file, pattern, via);

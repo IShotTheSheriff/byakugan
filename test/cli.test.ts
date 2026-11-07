@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, symlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { analyze } from '../src/index.ts';
@@ -97,5 +97,76 @@ describe('cli', () => {
     symlinkSync('../packages/lib', join(dir, 'node_modules/lib'));
     edit(dir, 'src/main.tsx', s => `import { x } from 'lib';\nconsole.log(x);\n${s}`);
     assert.match(run(['-C', dir]).stdout, /lib resolves to build output \(packages\/lib\/dist\/index\.js\)/);
+  });
+});
+
+describe('cli --workspace', () => {
+  /** The monorepo fixture plus a second app, apps/docs, that uses nothing from @acme/ui. */
+  const workspace = () => {
+    const dir = fixture('monorepo');
+    mkdirSync(join(dir, 'node_modules/@acme'), { recursive: true });
+    symlinkSync('../../packages/ui', join(dir, 'node_modules/@acme/ui'));
+    write(dir, '.gitignore', 'node_modules/\n');
+    write(dir, 'apps/docs/package.json', JSON.stringify({ name: 'docs', private: true, type: 'module' }));
+    write(dir, 'apps/docs/src/index.ts', "export const title = 'docs';\n");
+    initRepo(dir);
+    return dir;
+  };
+
+  test('affected lists only the apps a change reaches, and skips the library they use', () => {
+    const dir = workspace();
+    edit(dir, 'packages/ui/src/cx.ts', s => `${s}\nexport const extra = 1;\n`);
+    edit(dir, 'apps/web/components/Hero.tsx', s => s.replace('</', ' !</'));
+    const output = join(dir, 'github-output');
+    const summary = join(dir, 'step-summary.md');
+    const { code, stdout } = run(['affected', '--workspace', '--base', 'main', '--json', '-C', dir], { GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary });
+    assert.equal(code, 0);
+    const result = JSON.parse(stdout);
+    assert.deepEqual(result.apps.map((a: { app: string }) => a.app), ['apps/docs', 'apps/web']);
+    assert.deepEqual(result.affected, ['apps/web']);
+    assert.match(readFileSync(output, 'utf8'), /^apps=\["apps\/web"\]$/m);
+    assert.match(readFileSync(summary, 'utf8'), /\| apps\/docs \| unaffected \|/);
+  });
+
+  test('with no change, no app is affected and --exit-code exits 0', () => {
+    const dir = workspace();
+    const { code, stdout } = run(['affected', '--workspace', '--base', 'main', '--exit-code', '-C', dir]);
+    assert.equal(code, 0);
+    assert.match(stdout, /apps\/docs\s+unaffected/);
+    assert.match(stdout, /apps\/web\s+unaffected/);
+  });
+
+  test('hash writes one manifest per app that affected --base-manifest reads back', () => {
+    const dir = workspace();
+    const manifests = join(dir, 'manifests');
+    assert.equal(run(['hash', '--workspace', '--manifest', manifests, '-C', dir]).code, 0);
+    assert.ok(readFileSync(join(manifests, 'apps__web.json'), 'utf8').includes('"fragments"'));
+    edit(dir, 'apps/docs/src/index.ts', s => s.replace('docs', 'handbook'));
+    const { code, stdout } = run(['affected', '--workspace', '--base-manifest', manifests, '--exit-code', '-C', dir]);
+    assert.equal(code, 1);
+    assert.match(stdout, /apps\/docs\s+affected/);
+    assert.match(stdout, /apps\/web\s+unaffected/);
+  });
+
+  test('an app whose graph fails counts as affected', () => {
+    const dir = workspace();
+    write(dir, 'apps/docs/byakugan.json', '{ "entry": "src/index.ts" }');
+    const { stdout } = run(['affected', '--workspace', '--base', 'main', '-C', dir]);
+    assert.match(stdout, /apps\/docs\s+affected\s+error: /);
+  });
+});
+
+describe('cli --json', () => {
+  test('affected and why print chains as keys, without absolute paths or NUL bytes', () => {
+    const dir = fixture('basic');
+    initRepo(dir);
+    edit(dir, 'src/utils.ts', s => s.replace('export const cn', 'export const cn2 = 1;\nexport const cn'));
+    const affectedJson = run(['affected', '--base', 'main', '--json', '-C', dir]).stdout;
+    const whyJson = run(['why', 'lodash', '--json', '-C', dir]).stdout;
+    for (const out of [affectedJson, whyJson]) {
+      assert.ok(!out.includes(dir), 'no absolute path');
+      assert.ok(!out.includes('\\u0000'), 'no NUL');
+    }
+    assert.ok(JSON.parse(whyJson).matches[0].chain[0].endsWith('(entry)'));
   });
 });

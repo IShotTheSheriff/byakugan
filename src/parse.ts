@@ -18,6 +18,8 @@ export interface Usage {
   contexts: Set<string>;
   /** Files the code points at by path. `kind\0path`, see `PathKind`. */
   paths: Set<string>;
+  /** Environment variables read by name: `process.env.X`, `import.meta.env.X`, `const { X } = process.env`. */
+  env: Set<string>;
 }
 
 /**
@@ -26,7 +28,7 @@ export interface Usage {
  * - `file-tree`, `cwd-tree`: the same with a computed tail; the static part is a directory.
  * - `glob`: Vite `import.meta.glob` patterns joined by `\u0001`. `/` is the project root.
  */
-export type PathKind = 'rel' | 'file' | 'cwd' | 'file-tree' | 'cwd-tree' | 'glob';
+export type PathKind = 'rel' | 'file' | 'cwd' | 'file-tree' | 'cwd-tree' | 'glob' | 'alias';
 
 export const GLOB_SEPARATOR = '\u0001';
 
@@ -112,15 +114,18 @@ export interface ParseOptions {
 
 export interface OpaqueModule {
   kind: 'opaque';
-  reason: 'commonjs' | 'asset' | 'parse-error' | 'mdx';
+  reason: 'commonjs' | 'asset' | 'parse-error' | 'mdx' | 'component';
   content: string | Buffer;
   /** Content hash for files too big to keep in memory. Wins over `content`. */
   hash?: string;
   specifiers: string[];
   /** Stylesheets only: absolute paths of `url()` targets that do not exist. */
   missing?: string[];
-  /** CommonJS only: see `Usage`. */
+  /** Single-file components only: imports of their `<script>` blocks, by imported name (`*` for all). */
+  imports?: Array<{ source: string; name: string; type: boolean }>;
+  /** CommonJS and single-file components: see `Usage`. */
   contexts?: string[];
+  env?: string[];
   paths?: string[];
   jsx: boolean;
 }
@@ -166,6 +171,7 @@ export const newUsage = (): Usage => ({
   types: new Set(),
   contexts: new Set(),
   paths: new Set(),
+  env: new Set(),
 });
 
 /** Glob-like pattern for a computed specifier: static parts kept, computed parts as `*`. */
@@ -183,6 +189,8 @@ const specifierPattern = (value: unknown): string => {
 };
 
 const RELATIVE_FILE = /^\.\.?\/[^\n*?"<>|]*\.[A-Za-z0-9]{1,10}$/;
+/** `'~/assets/main.css'` in a Nuxt config, `'@/styles.css'` or `'$lib/x.css'`: a file behind a path alias. */
+const ALIAS_FILE = /^(?:~~|@@|~|@|\$lib)\/[^\n*?"<>|]*\.[A-Za-z0-9]{1,10}$/;
 
 const isProcessCwd = (n: N | undefined) => {
   const callee = node(n?.callee);
@@ -254,6 +262,7 @@ const mergeUsage = (into: Usage, from: Usage) => {
   for (const t of from.types) into.types.add(t);
   for (const c of from.contexts) into.contexts.add(c);
   for (const p of from.paths) into.paths.add(p);
+  for (const e of from.env) into.env.add(e);
 };
 
 const addMember = (usage: Usage, object: string, member: string) => {
@@ -302,6 +311,13 @@ const requireContext = (n: N, usage: Usage): boolean => {
 
 const NONE: unknown[] = [];
 
+/** `process.env` or `import.meta.env`. */
+const isEnvObject = (n: N | undefined) => {
+  if (n?.type !== 'MemberExpression' || n.computed || nameOf(n.property) !== 'env') return false;
+  const object = node(n.object);
+  return (object?.type === 'Identifier' && object.name === 'process') || object?.type === 'MetaProperty';
+};
+
 /**
  * One step of `walk`: records what `n` refers to and returns the children still to visit,
  * or undefined to visit every child.
@@ -314,6 +330,19 @@ const visit = (n: N, usage: Usage): unknown[] | undefined => {
       return;
     case 'MemberExpression': {
       const object = node(n.object);
+      if (isEnvObject(object)) {
+        const name = n.computed ? staticString(n.property) : nameOf(n.property);
+        if (name) {
+          usage.env.add(name);
+          if (nameOf(node(object?.object)) === 'process') addMember(usage, 'process', 'env');
+          return n.computed ? [n.property] : NONE;
+        }
+      }
+      // `import.meta.env` used whole: Vite inlines it as an object of every exposed variable.
+      if (isEnvObject(n) && object?.type === 'MetaProperty') {
+        usage.env.add('*');
+        return NONE;
+      }
       if (!n.computed && object?.type === 'Identifier') {
         addMember(usage, object.name as string, nameOf(n.property));
         return NONE;
@@ -350,10 +379,23 @@ const visit = (n: N, usage: Usage): unknown[] | undefined => {
       return [n.value];
     case 'LabeledStatement':
       return [n.body];
+    case 'VariableDeclarator': {
+      const id = node(n.id);
+      const init = node(n.init);
+      if (id?.type === 'ObjectPattern' && isEnvObject(init)) {
+        const properties = nodes(id.properties);
+        for (const p of properties) if (p.type === 'Property' && !p.computed) usage.env.add(nameOf(p.key));
+        // `const { A, ...rest } = import.meta.env` keeps the whole object.
+        if (properties.some(p => p.type === 'RestElement' || p.computed) && node(init?.object)?.type === 'MetaProperty') usage.env.add('*');
+        return [n.id, ...(nameOf(node(init?.object)) === 'process' ? [init?.object] : [])];
+      }
+      return;
+    }
     case 'TSEnumMember':
       return [n.initializer];
     case 'Literal':
       if (typeof n.value === 'string' && RELATIVE_FILE.test(n.value)) usage.paths.add(`rel\0${n.value}`);
+      else if (typeof n.value === 'string' && ALIAS_FILE.test(n.value)) usage.paths.add(`alias\0${n.value}`);
       return NONE;
     case 'TemplateLiteral': {
       const fixed = staticString(n);
@@ -514,16 +556,12 @@ type Comment = ParseResult['comments'][number];
 const SIGNIFICANT_COMMENT =
   /[@#]__[A-Z_]+__|@(?:license|preserve|internal|refresh|vite-ignore|ts-ignore|ts-expect-error|ts-nocheck|ts-check|jest-environment|vitest-environment)\b|\b(?:webpack|turbopack)[A-Z]|\b(?:istanbul|c8|v8)[ \t]+ignore\b|\bnode:coverage[ \t]|^[#@][ \t]*source(?:Mapping)?URL=|^\s*(?:GraphQL|graphql|gql)\s*$/;
 const JSX_PRAGMA_LINE = new RegExp(JSX_PRAGMA.source);
-const LINE_BREAK = /[\n\r\u2028\u2029]/;
-const isLineBreak = (c: number) => c === 10 || c === 13 || c === 0x2028 || c === 0x2029;
 /** Matches what `\s` matches, ECMAScript white space and line terminators. */
 const isSpace = (c: number) =>
   c === 32 ||
   (c >= 9 && c <= 13) ||
   (c >= 0xa0 &&
     (c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff));
-/** `( ) [ ] { } , ;` never join a neighbour into another token, so a space beside them means nothing. */
-const isTight = (c: number) => c === 40 || c === 41 || c === 91 || c === 93 || c === 123 || c === 125 || c === 44 || c === 59;
 const JS_FILE = /\.[cm]?jsx?$/;
 
 const isSignificant = (comment: Comment, jsdoc: boolean) =>
@@ -554,16 +592,6 @@ const jsxText = (raw: string): string => {
   return kept.join(' ');
 };
 
-/** A stretch of source that fragment text does not copy as it is. */
-interface Mark {
-  start: number;
-  end: number;
-  /** `raw` copies the source, `space` stands for whitespace, `text` replaces it with `text`. */
-  kind: 'raw' | 'space' | 'text';
-  text?: string;
-  newline?: boolean;
-}
-
 /** Index of the first item that starts at or after `pos`. */
 const firstFrom = (items: Array<{ start: number }>, pos: number) => {
   let low = 0;
@@ -576,128 +604,132 @@ const firstFrom = (items: Array<{ start: number }>, pos: number) => {
   return low;
 };
 
+/** Keys that hold where code sits or how it was spelled, not what it does. */
+const SPELLING_KEYS = new Set(['start', 'end', 'range', 'loc']);
+const PARENS = new Set(['ParenthesizedExpression', 'TSParenthesizedType']);
+
 /**
- * Where fragment text leaves the source: literals and significant comments stay as written,
- * other comments become whitespace, JSX text becomes what the compiler keeps of it, and JSX
- * children that hold nothing but a comment go. Iterative, like `walk`.
+ * Fragment text from the syntax tree, so a formatter run changes nothing: positions, quote
+ * style, parentheses, semicolons and trailing commas leave no trace. The tree keeps what ASI
+ * decided (`return\nx` is `return; x`), and the text of literals and template parts. JSX text
+ * becomes what the compiler keeps of it, and JSX children holding nothing but a comment go.
+ * Significant comments stay, each before the node that follows it, the rest at the end.
  */
-const textMarks = (source: string, program: N, comments: Comment[], significant: boolean[]): Mark[] => {
-  const marks: Mark[] = [];
-  const kept = comments.filter((_, i) => significant[i]);
-  comments.forEach((c, i) =>
-    marks.push(significant[i] ? { start: c.start, end: c.end, kind: 'raw' } : { start: c.start, end: c.end, kind: 'space', newline: c.type === 'Block' && LINE_BREAK.test(c.value) })
-  );
-  const hashbang = node(program.hashbang);
-  if (hashbang) marks.push({ start: hashbang.start, end: hashbang.end, kind: 'raw' });
+const canonicalText = (source: string, significant: Comment[]) => {
+  const at = new Map<number, Comment[]>();
+  for (const c of significant) {
+    const pos = skipSpace(source, c.end);
+    const list = at.get(pos);
+    if (list) list.push(c);
+    else at.set(pos, [c]);
+  }
   const cleaned = (n: N | undefined) => (n?.type === 'JSXText' ? jsxText(source.slice(n.start, n.end)) : undefined);
-  const holdsSignificant = (n: N) => (kept[firstFrom(kept, n.start)]?.start ?? Infinity) < n.end;
+  const holdsSignificant = (n: N) => (significant[firstFrom(significant, n.start)]?.start ?? Infinity) < n.end;
   /** An empty child such as `{}`, or one with only a comment in it, compiles to nothing. */
   const blank = (n: N | undefined) =>
     n?.type === 'JSXExpressionContainer' && node(n.expression)?.type === 'JSXEmptyExpression' && !holdsSignificant(n);
-  const blanks = (children: N[]) => {
-    for (let i = 0; i < children.length; i++) {
-      if (!blank(children[i])) continue;
+  const children = (list: N[]) => {
+    const out: unknown[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const child = list[i];
+      if (child.type === 'JSXText') {
+        const text = cleaned(child) as string;
+        if (text !== '') out.push({ type: 'JSXText', value: text });
+        continue;
+      }
+      if (!blank(child)) {
+        out.push(child);
+        continue;
+      }
       let j = i;
-      while (j < children.length && (blank(children[j]) || cleaned(children[j]) === '')) j++;
+      while (j < list.length && (blank(list[j]) || cleaned(list[j]) === '')) j++;
       // `a{/* note */}b` compiles to two texts and `ab` to one, so the braces stay between texts.
-      const text = cleaned(children[i - 1]) && cleaned(children[j]) ? '{}' : '';
-      for (let k = i; k < j; k++) if (blank(children[k])) marks.push({ start: children[k].start, end: children[k].end, kind: 'text', text });
+      if (cleaned(list[i - 1]) && cleaned(list[j])) out.push('{}');
       i = j - 1;
     }
+    return out;
   };
-  const stack: unknown[] = [program];
-  while (stack.length > 0) {
-    const value = stack.pop();
-    if (Array.isArray(value)) {
-      for (let i = value.length - 1; i >= 0; i--) stack.push(value[i]);
-      continue;
-    }
-    if (!isNode(value)) continue;
-    if (value.type === 'Literal' || value.type === 'TemplateElement') {
-      marks.push({ start: value.start, end: value.end, kind: 'raw' });
-      continue;
-    }
-    if (value.type === 'JSXText') {
-      marks.push({ start: value.start, end: value.end, kind: 'text', text: cleaned(value) });
-      continue;
-    }
-    if (value.type === 'JSXElement' || value.type === 'JSXFragment') blanks(nodes(value.children));
-    const keys = visitorKeys[value.type];
-    if (!keys) continue;
-    for (let i = keys.length - 1; i >= 0; i--) stack.push(value[keys[i]]);
-  }
-  marks.sort((a, b) => a.start - b.start || b.end - a.end);
-  // A comment inside a blank JSX child goes with it.
-  const out: Mark[] = [];
-  let end = -1;
-  for (const mark of marks) {
-    if (mark.start < end) continue;
-    out.push(mark);
-    end = mark.end;
-  }
-  return out;
-};
-
-/**
- * Builds fragment text, the source from `start` to `end` without insignificant comments. Each
- * run of whitespace outside literals becomes one line break if it holds one, since automatic
- * semicolon insertion reads them (`return\nx`). Otherwise it becomes one space, or nothing
- * beside a bracket, comma or semicolon.
- */
-const cleaner = (source: string, marks: Mark[]) => (start: number, end: number): string => {
-  let out = '';
-  let pending = '';
-  const space = (newline: boolean) => {
-    pending = newline || pending === '\n' ? '\n' : ' ';
-  };
-  const token = (text: string) => {
-    if (out && (pending === '\n' || (pending === ' ' && !isTight(out.charCodeAt(out.length - 1)) && !isTight(text.charCodeAt(0))))) out += pending;
-    pending = '';
-    out += text;
-  };
-  const gap = (from: number, to: number) => {
-    let i = from;
-    while (i < to) {
-      const first = i;
-      if (isSpace(source.charCodeAt(i))) {
-        let newline = false;
-        for (; i < to && isSpace(source.charCodeAt(i)); i++) newline ||= isLineBreak(source.charCodeAt(i));
-        space(newline);
-      } else {
-        while (i < to && !isSpace(source.charCodeAt(i))) i++;
-        token(source.slice(first, i));
+  return (n: N, start: number, end: number): string => {
+    const used = new Set<Comment>();
+    /** What JSON.stringify with a replacer would serialize for `holder[key]`, undefined to leave it out. */
+    const prepare = (holder: unknown, key: string, value: unknown): unknown => {
+      if (SPELLING_KEYS.has(key)) return undefined;
+      // `raw` spells a literal (`'a'` or `"a"`), except in a template part, where `String.raw` reads it.
+      if (key === 'raw' && isNode(holder) && holder.type !== 'TemplateElement') return undefined;
+      if (typeof value === 'bigint') return `${value}n`;
+      // JSON writes `1e999` as `null`, which would make it equal to the `null` literal.
+      if (typeof value === 'number' && !Number.isFinite(value)) return String(value);
+      if (typeof value === 'function' || typeof value === 'symbol') return undefined;
+      if (!isNode(value)) return value;
+      let current = value;
+      while (PARENS.has(current.type) && isNode(current.expression ?? current.typeAnnotation)) current = (current.expression ?? current.typeAnnotation) as N;
+      const notes = (at.get(value.start) ?? []).concat(current === value ? [] : (at.get(current.start) ?? [])).filter(c => !used.has(c));
+      for (const c of notes) used.add(c);
+      const out: Record<string, unknown> = notes.length > 0 ? { comments: notes.map(c => source.slice(c.start, c.end)), ...current } : current;
+      if (current.type === 'JSXElement' || current.type === 'JSXFragment') return { ...out, children: children(nodes(current.children)) };
+      return out;
+    };
+    // Iterative, so code nested thousands of levels deep does not overflow the stack.
+    const parts: string[] = [];
+    const stack: Array<string | { value: unknown }> = [{ value: prepare(undefined, '', n) }];
+    while (stack.length > 0) {
+      const item = stack.pop() as string | { value: unknown };
+      if (typeof item === 'string') {
+        parts.push(item);
+        continue;
       }
+      const value = item.value;
+      if (value === null || typeof value !== 'object') {
+        parts.push(value === undefined ? 'null' : JSON.stringify(value));
+        continue;
+      }
+      if (value instanceof RegExp) {
+        parts.push('{}');
+        continue;
+      }
+      if (Array.isArray(value)) {
+        stack.push(']');
+        for (let i = value.length - 1; i >= 0; i--) {
+          const element = prepare(value, String(i), value[i]);
+          stack.push({ value: element === undefined ? null : element });
+          if (i > 0) stack.push(',');
+        }
+        stack.push('[');
+        continue;
+      }
+      const entries: Array<[string, unknown]> = [];
+      for (const key of Object.keys(value)) {
+        const prepared = prepare(value, key, (value as Record<string, unknown>)[key]);
+        if (prepared !== undefined) entries.push([key, prepared]);
+      }
+      stack.push('}');
+      for (let i = entries.length - 1; i >= 0; i--) {
+        stack.push({ value: entries[i][1] });
+        stack.push(`${i > 0 ? ',' : ''}${JSON.stringify(entries[i][0])}:`);
+      }
+      stack.push('{');
     }
+    const text = parts.join('');
+    const rest = significant.filter(c => c.start >= start && c.end <= end && !used.has(c));
+    return rest.length > 0 ? `${text}\n${rest.map(c => source.slice(c.start, c.end)).join('\n')}` : text;
   };
-  let pos = start;
-  for (let i = firstFrom(marks, start); i < marks.length && marks[i].start < end; i++) {
-    const mark = marks[i];
-    gap(pos, mark.start);
-    if (mark.kind === 'raw') token(source.slice(mark.start, mark.end));
-    else if (mark.kind === 'space') space(mark.newline === true);
-    else if (mark.text) token(mark.text);
-    pos = mark.end;
-  }
-  gap(pos, end);
-  return out;
 };
 
 interface SourceText {
-  /** Fragment text for a span, see `cleaner`. */
-  clean: (start: number, end: number) => string;
+  /** Fragment text for node `n`, which spans `start` to `end`. See `canonicalText`. */
+  clean: (n: N, start: number, end: number) => string;
   /** Significant comments, which count wherever they are. */
   significant: Comment[];
 }
 
 const sourceText = (file: string, source: string, result: ParseResult, options: ParseOptions): SourceText => {
   // A package file changes only with the package, so its text can stay as it is.
-  if (isInNodeModules(file)) return { clean: (start, end) => source.slice(start, end), significant: [] };
+  if (isInNodeModules(file)) return { clean: (_, start, end) => source.slice(start, end), significant: [] };
   const comments = result.comments ?? [];
   // JSDoc tags are types in a JavaScript file TypeScript checks.
   const jsdoc = JS_FILE.test(file) && (options.checkJs === true || comments.some(c => /@ts-check\b/.test(c.value)));
-  const significant = comments.map(c => isSignificant(c, jsdoc));
-  const marks = textMarks(source, result.program as unknown as N, comments, significant);
-  return { clean: cleaner(source, marks), significant: comments.filter((_, i) => significant[i]) };
+  const significant = comments.filter(c => isSignificant(c, jsdoc));
+  return { clean: canonicalText(source, significant), significant };
 };
 
 export const parseModule = (file: string, source: string, options: ParseOptions = {}): ParseOutcome => {
@@ -733,6 +765,121 @@ const isFreshValue = (init: unknown): boolean => {
   return current !== undefined && FRESH_VALUES.has(current.type);
 };
 
+/**
+ * Packages whose calls only build values: a `cva()` or `z.object()` nobody uses can go.
+ * A call into anything else may register, patch or subscribe, so it runs with the module.
+ */
+const PURE_SOURCES = /^(?:react|class-variance-authority|tailwind-variants|clsx|tailwind-merge|zod|valibot|yup|@sinclair\/typebox|arktype|styled-components|@emotion\/styled|@tanstack\/react-table|hono)(?:\/|$)/;
+/** Globals whose calls build values. `Object.assign` and `Object.defineProperty` change their target. */
+const PURE_GLOBALS = new Set([
+  'Symbol', 'Object', 'Array', 'String', 'Number', 'Boolean', 'BigInt', 'Math', 'JSON', 'Date', 'RegExp', 'Map', 'Set',
+  'WeakMap', 'WeakSet', 'WeakRef', 'URL', 'URLSearchParams', 'Error', 'TypeError', 'RangeError', 'Intl', 'parseInt',
+  'parseFloat', 'isNaN', 'isFinite', 'encodeURIComponent', 'decodeURIComponent', 'encodeURI', 'decodeURI',
+  'structuredClone', 'Uint8Array', 'TextEncoder', 'TextDecoder',
+]);
+const MUTATING_STATICS = new Set(['assign', 'defineProperty', 'defineProperties', 'setPrototypeOf']);
+/** `Array.prototype.push.call(list, x)`: a built-in reached this way changes its target. */
+const BORROWING = new Set(['prototype', 'call', 'apply', 'bind']);
+const FUNCTIONS = new Set(['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration', 'TSDeclareFunction']);
+const CLASSES = new Set(['ClassExpression', 'ClassDeclaration']);
+const VALUE_WRAPPERS = new Set([...WRAPPERS, 'TSInstantiationExpression']);
+
+/** What a top-level piece of code does while the module evaluates, outside function bodies. */
+interface Eager {
+  refs: Set<string>;
+  /** Some call, `new`, assignment or `await` may do more than build a value. */
+  impure: boolean;
+}
+
+const calleeRoot = (callee: unknown): N | undefined => {
+  let current = node(callee);
+  while (current) {
+    if (current.type === 'MemberExpression') current = node(current.object);
+    else if (current.type === 'CallExpression' || current.type === 'NewExpression') current = node(current.callee);
+    else if (current.type === 'TaggedTemplateExpression') current = node(current.tag);
+    else if (current.type === 'ChainExpression' || VALUE_WRAPPERS.has(current.type)) current = node(current.expression);
+    else return current;
+  }
+};
+
+/**
+ * `library`: a call into a package that only builds values; function arguments are not run yet.
+ * `builtin`: a built-in or a method of a literal, which may call its function arguments now.
+ */
+type Purity = 'library' | 'builtin' | false;
+
+const eagerOf = (root: unknown, isPure: (call: N) => Purity, mayCall: (name: string) => boolean = () => true): Eager => {
+  const eager: Eager = { refs: new Set(), impure: false };
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (Array.isArray(value)) {
+      for (let i = value.length - 1; i >= 0; i--) stack.push(value[i]);
+      continue;
+    }
+    if (!isNode(value) || FUNCTIONS.has(value.type)) continue;
+    if (value.type.startsWith('TS') && !VALUE_WRAPPERS.has(value.type) && value.type !== 'TSEnumDeclaration' && value.type !== 'TSEnumMember') continue;
+    if (CLASSES.has(value.type)) {
+      // A class body runs on definition only in its heritage, decorators, computed keys and static members.
+      stack.push(value.superClass, value.decorators);
+      for (const m of nodes(node(value.body)?.body)) {
+        stack.push(m.decorators);
+        if (m.computed) stack.push(m.key);
+        if (m.type === 'StaticBlock') stack.push(m.body);
+        else if (m.static && m.type !== 'MethodDefinition') stack.push(m.value);
+      }
+      continue;
+    }
+    switch (value.type) {
+      case 'Identifier':
+      case 'JSXIdentifier':
+        eager.refs.add(value.name as string);
+        continue;
+      case 'MemberExpression':
+        stack.push(value.object);
+        if (value.computed) stack.push(value.property);
+        continue;
+      case 'AssignmentExpression':
+      case 'UpdateExpression':
+      case 'AwaitExpression':
+      case 'YieldExpression':
+      case 'ImportExpression':
+        eager.impure = true;
+        break;
+      case 'UnaryExpression':
+        if (value.operator === 'delete') eager.impure = true;
+        break;
+      case 'CallExpression':
+      case 'NewExpression':
+      case 'TaggedTemplateExpression': {
+        const purity = isPure(value);
+        if (!purity) {
+          eager.impure = true;
+          break;
+        }
+        // `[1].map(f)`, `JSON.parse(s, reviver)`, `'x'.replace(/x/, fn)`: the callback runs now.
+        if (purity === 'builtin')
+          for (const arg of nodes(value.arguments)) {
+            if (FUNCTIONS.has(arg.type)) stack.push(arg.body);
+            else if (arg.type === 'Identifier' && mayCall(arg.name as string)) eager.impure = true;
+          }
+        break;
+      }
+    }
+    const keys = visitorKeys[value.type];
+    if (!keys) continue;
+    const skipKey = KEYED.has(value.type) && !value.computed;
+    for (let i = keys.length - 1; i >= 0; i--) if (!(skipKey && keys[i] === 'key')) stack.push(value[keys[i]]);
+  }
+  return eager;
+};
+
+/** Index of the first non-space character at or after `pos`. */
+const skipSpace = (source: string, pos: number) => {
+  while (pos < source.length && isSpace(source.charCodeAt(pos))) pos++;
+  return pos;
+};
+
 const analyze = (
   source: string,
   text: SourceText,
@@ -749,10 +896,11 @@ const analyze = (
       module: {
         kind: 'opaque',
         reason: 'commonjs',
-        content: text.clean(0, source.length),
+        content: text.clean(program, 0, source.length),
         specifiers: [...usage.dynamic, ...usage.types],
         contexts: [...usage.contexts],
         paths: [...usage.paths],
+        env: [...usage.env],
         jsx: sawJsx,
       },
       errors,
@@ -761,17 +909,27 @@ const analyze = (
 
   /** Spans fragment text came from, so significant comments outside them can count on their own. */
   const spans: Array<{ start: number; end: number }> = [];
-  const span = (start: number, end: number) => {
+  const span = (n: N, start: number, end: number) => {
     spans.push({ start, end });
-    return text.clean(start, end);
+    return text.clean(n, start, end);
   };
-  const slice = (n: N) => span(n.start, n.end);
+  const slice = (n: N) => span(n, n.start, n.end);
   const imports = new Map<string, ImportBinding>();
   const exports = new Map<string, ExportEntry>();
   const stars: StarExport[] = [];
   const decls = new Map<string, Decl>();
   const requests: ModuleRequest[] = [];
-  const effects: Array<{ pos: number; text: string }> = [];
+  const effects: Array<{ pos: number; text: string; node?: N }> = [];
+  /** Top-level code that runs on definition: initializers, class definitions, `export default` expressions. */
+  const eager: Array<{ names: string[]; node: unknown; pos: number }> = [];
+  /** Where each value binding is declared. Function declarations are hoisted, so their place does not matter. */
+  const declared = new Map<string, { pos: number; hoisted: boolean }>();
+  /** Local functions, which a built-in such as `forEach` may call. */
+  /** Top-level functions by name, to read what a callback does when a built-in calls it. */
+  const functions = new Map<string, N>();
+  const place = (name: string, pos: number, hoisted: boolean) => {
+    if (!declared.has(name)) declared.set(name, { pos, hoisted });
+  };
   const effectUsage = newUsage();
   const typeEffects: string[] = [];
   const typeUsage = newUsage();
@@ -785,7 +943,7 @@ const analyze = (
   /** A class with decorators written before `export` starts at the first decorator. */
   const spanOf = (stmt: N, decl: N) => {
     const first = nodes(decl.decorators)[0];
-    return first && first.start < stmt.start ? span(first.start, stmt.end) : slice(stmt);
+    return first && first.start < stmt.start ? span(stmt, first.start, stmt.end) : slice(stmt);
   };
 
   /** Decorators and static blocks run when the class is defined, like top-level code (route registration, DI). */
@@ -815,7 +973,7 @@ const analyze = (
   };
 
   const effect = (stmt: N) => {
-    effects.push({ pos: stmt.start, text: slice(stmt) });
+    effects.push({ pos: stmt.start, text: slice(stmt), node: stmt });
     walk(stmt, effectUsage);
   };
 
@@ -828,6 +986,9 @@ const analyze = (
         for (const declarator of nodes(decl.declarations)) {
           const names = bindingNames(declarator.id);
           declare(names, prefix + slice(declarator), declarator);
+          for (const name of names) place(name, declarator.start, false);
+          if (names.length === 1 && FUNCTIONS.has(node(declarator.init)?.type ?? '')) functions.set(names[0], node(declarator.init) as N);
+          if (declarator.init && !decl.declare) eager.push({ names, node: declarator.init, pos: declarator.start });
           if (names.length === 1 && isFreshValue(declarator.init)) attachable.add(names[0]);
           if (exported) for (const name of names) exportLocal(name, false);
         }
@@ -841,6 +1002,14 @@ const analyze = (
       case 'TSEnumDeclaration': {
         const name = nameOf(decl.id);
         declare([name], spanOf(stmt, decl), decl);
+        if (decl.type === 'FunctionDeclaration') {
+          place(name, stmt.start, true);
+          functions.set(name, decl);
+        }
+        if ((decl.type === 'ClassDeclaration' || decl.type === 'TSEnumDeclaration') && !decl.declare) {
+          place(name, stmt.start, false);
+          eager.push({ names: [name], node: decl, pos: stmt.start });
+        }
         if (decl.type === 'FunctionDeclaration' || decl.type === 'ClassDeclaration') attachable.add(name);
         if (decl.type === 'ClassDeclaration') classEffects(stmt, decl, name);
         if (exported) exportLocal(name, decl.type === 'TSInterfaceDeclaration' || decl.type === 'TSTypeAliasDeclaration');
@@ -937,6 +1106,11 @@ const analyze = (
             declaration.type === 'TSInterfaceDeclaration')
         ) {
           declare([id.name as string], spanOf(stmt, declaration), declaration);
+          if (declaration.type === 'FunctionDeclaration') place(id.name as string, stmt.start, true);
+          if (declaration.type === 'ClassDeclaration') {
+            place(id.name as string, stmt.start, false);
+            eager.push({ names: [id.name as string], node: declaration, pos: stmt.start });
+          }
           if (declaration.type !== 'TSInterfaceDeclaration') attachable.add(id.name as string);
           if (declaration.type === 'ClassDeclaration') classEffects(stmt, declaration, id.name as string);
           exports.set('default', { name: 'default', local: id.name as string, type: declaration.type === 'TSInterfaceDeclaration' });
@@ -945,6 +1119,7 @@ const analyze = (
           exports.set('default', { name: 'default', local, type: false, text: `export default ${local}` });
         } else {
           declare(['default'], spanOf(stmt, declaration), declaration);
+          if (declaration.type !== 'FunctionDeclaration' && declaration.type !== 'TSDeclareFunction') eager.push({ names: ['default'], node: declaration, pos: stmt.start });
           if (declaration.type === 'ClassDeclaration') classEffects(stmt, declaration, 'default');
           exports.set('default', { name: 'default', local: 'default', type: false });
         }
@@ -965,6 +1140,7 @@ const analyze = (
       case 'TSExportAssignment':
         exportEquals = true;
         declare(['default'], slice(stmt), stmt.expression);
+        eager.push({ names: ['default'], node: stmt.expression, pos: stmt.start });
         exports.set('default', { name: 'default', local: 'default', type: false });
         break;
       case 'TSNamespaceExportDeclaration':
@@ -1000,6 +1176,74 @@ const analyze = (
       walk(stmt, decl.usage);
     } else effect(stmt);
   }
+
+  // `/*#__PURE__*/ f()`: the annotation sits right before the call.
+  const annotated = new Set<number>();
+  for (const c of result.comments ?? []) if (/[@#]__PURE__/.test(c.value)) annotated.add(skipSpace(source, c.end));
+  const borrows = (callee: unknown): boolean => {
+    for (let current = node(callee); current?.type === 'MemberExpression'; current = node(current.object)) if (BORROWING.has(nameOf(current.property))) return true;
+    return false;
+  };
+  const isPure = (call: N): Purity => {
+    if (annotated.has(call.start)) return 'library';
+    const callee = call.type === 'TaggedTemplateExpression' ? call.tag : call.callee;
+    const root = calleeRoot(callee);
+    if (!root) return false;
+    if (root.type !== 'Identifier') {
+      const literal = root.type === 'Literal' || root.type === 'TemplateLiteral' || root.type === 'ArrayExpression' || root.type === 'ObjectExpression';
+      return literal && !borrows(callee) ? 'builtin' : false;
+    }
+    const name = root.name as string;
+    const binding = imports.get(name);
+    if (binding) return !binding.type && PURE_SOURCES.test(binding.source) ? 'library' : false;
+    if (declared.has(name) || decls.has(name)) return false;
+    const member = node(callee);
+    if (member?.type === 'MemberExpression' && node(member.object) === root && MUTATING_STATICS.has(nameOf(member.property))) return false;
+    return PURE_GLOBALS.has(name) && !borrows(callee) ? 'builtin' : false;
+  };
+  /**
+   * Whether calling `name`, passed to a built-in that calls it, may do more than build a value:
+   * an import from outside the pure libraries, or a local function whose parameters or body
+   * may. A function that calls itself, or a declaration with no body, counts as impure.
+   */
+  const calling = new Set<string>();
+  const mayCall = (name: string): boolean => {
+    const binding = imports.get(name);
+    if (binding) return binding.type || !PURE_SOURCES.test(binding.source);
+    const fn = functions.get(name);
+    if (!fn) return false;
+    if (calling.has(name) || !fn.body || fn.async || fn.generator) return true;
+    calling.add(name);
+    try {
+      return eagerOf([fn.params, fn.body], isPure, mayCall).impure;
+    } finally {
+      calling.delete(name);
+    }
+  };
+  /** A binding that top-level code reads before or after its declaration: moving one past the other can throw. */
+  const order = (refs: Set<string>, own: string[], pos: number) => {
+    const marks: string[] = [];
+    for (const ref of [...refs].sort()) {
+      const at = declared.get(ref);
+      if (!at || at.hoisted || own.includes(ref)) continue;
+      marks.push(`${ref} ${at.pos < pos ? 'before' : 'after'}`);
+    }
+    return marks.length > 0 ? `\n/* order: ${marks.join(', ')} */` : '';
+  };
+  const ran = new Set(effects.filter(e => e.text.endsWith(' runs on definition')).map(e => e.text));
+  for (const item of eager) {
+    const found = eagerOf(item.node, isPure, mayCall);
+    const decl = decls.get(item.names[0]);
+    if (decl) decl.text += order(found.refs, item.names, item.pos);
+    if (!found.impure) continue;
+    // `export const store = createStore()` runs whenever the module does, used or not.
+    const text = `${item.names.join(', ')} runs on definition`;
+    if (ran.has(text) || ran.has(`class ${text}`)) continue;
+    ran.add(text);
+    effects.push({ pos: item.pos, text });
+    for (const name of item.names) effectUsage.refs.add(name);
+  }
+  for (const e of effects) if (e.node) e.text += order(eagerOf(e.node, isPure, mayCall).refs, [], e.pos);
 
   // No fragment holds a `// @ts-expect-error` above an import or a `/*! license */` at the top.
   spans.sort((a, b) => a.start - b.start);
@@ -1045,4 +1289,108 @@ export const mdxModule = (source: string): OpaqueModule => {
   const specifiers: string[] = [];
   for (const match of source.matchAll(MDX_IMPORT)) specifiers.push(match[1] ?? match[2]);
   return { kind: 'opaque', reason: 'mdx', content: source, specifiers, jsx: true };
+};
+
+/**
+ * HTML comments, and `<script>` or `<style>` blocks. A comment matches first, so a `<script>` inside
+ * `<!-- -->` is skipped. Attribute values are read as quoted strings, so `generic="T extends X<Y>"`
+ * does not end the tag. Each alternative starts on a distinct character, so matching stays linear.
+ */
+const BLOCK = /<!--[\s\S]*?-->|<(script|style)\b((?:[^>"']|"[^"]*"|'[^']*')*)>([\s\S]*?)<\/\1\s*>/gi;
+/** `src="./logo.png"` in a template: Vue and Astro compile relative and aliased asset URLs to imports. */
+const TEMPLATE_ASSET = /\s(?:src|href|xlink:href|poster|srcset)\s*=\s*(?:"([^"\n]{1,2000})"|'([^'\n]{1,2000})'|([^\s"'>]{1,2000}))/g;
+const LOCAL_ASSET = /^(?:\.{1,2}\/|@\/|~\/)/;
+/** Imports a script that does not parse still names, read off its text. */
+const SCRIPT_IMPORT = /\b(?:import|export)\b[^'";]{0,2000}?\bfrom\s*['"]([^'"\n]+)['"]|\bimport\s*\(?\s*['"]([^'"\n]+)['"]/g;
+const ATTRIBUTE = (name: string) => new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, 'i');
+
+export interface ComponentParts {
+  /** Script blocks, with the extension to parse each one as. */
+  scripts: Array<{ code: string; ext: string }>;
+  /** Style blocks and their `lang`. */
+  styles: Array<{ code: string; ext: string }>;
+  /** Asset paths the template names. */
+  assets: string[];
+  /** `<script src>` and `<style src>`. */
+  sources: string[];
+}
+
+/** The parts of a `.vue`, `.svelte` or `.astro` file byakugan follows. Astro's frontmatter is a script. */
+export const componentParts = (file: string, source: string): ComponentParts => {
+  const parts: ComponentParts = { scripts: [], styles: [], assets: [], sources: [] };
+  const langExt = (attrs: string, fallback: string) => {
+    const lang = ATTRIBUTE('lang').exec(attrs)?.[1]?.toLowerCase();
+    return lang === 'tsx' || lang === 'jsx' ? '.tsx' : lang && /^(scss|sass|less|styl|stylus|postcss|css)$/.test(lang) ? `.${lang === 'postcss' ? 'css' : lang}` : fallback;
+  };
+  if (file.endsWith('.astro')) {
+    const front = /^\s*---\r?\n([\s\S]*?)\r?\n---/.exec(source);
+    if (front) parts.scripts.push({ code: front[1], ext: '.ts' });
+  }
+  for (const m of source.matchAll(BLOCK)) {
+    const [, tag, attrs = '', code = ''] = m;
+    if (!tag) continue;
+    const src = ATTRIBUTE('src').exec(attrs)?.[1];
+    if (src) parts.sources.push(src);
+    if (tag.toLowerCase() === 'style') {
+      parts.styles.push({ code, ext: langExt(attrs, '.css') });
+      continue;
+    }
+    // `<script type="application/ld+json">` and other data blocks are not code.
+    const type = ATTRIBUTE('type').exec(attrs)?.[1];
+    if (type && !/^(module|text\/javascript|text\/typescript|ts)$/i.test(type)) continue;
+    // Svelte and Vue TypeScript is usual even without `lang="ts"`, and the TypeScript parser reads plain JavaScript.
+    parts.scripts.push({ code, ext: langExt(attrs, '.ts') });
+  }
+  for (const m of source.matchAll(TEMPLATE_ASSET)) {
+    // `srcset="./a.png 1x, ./b.png 2x"` lists several.
+    for (const candidate of (m[1] ?? m[2] ?? m[3]).split(',')) {
+      const path = candidate.trim().split(/\s+/)[0];
+      if (LOCAL_ASSET.test(path)) parts.assets.push(path);
+    }
+  }
+  return parts;
+};
+
+/**
+ * A `.vue`, `.svelte` or `.astro` file: hashed whole, since its template uses its script in ways
+ * byakugan does not read. Its scripts' imports count by imported name, so a barrel still splits.
+ */
+export const componentModule = (file: string, source: string, scripts: Array<{ module: ModuleInfo; code: string }>, styleSpecifiers: string[]): OpaqueModule => {
+  const parts = componentParts(file, source);
+  const imports: Array<{ source: string; name: string; type: boolean }> = [];
+  const contexts = new Set<string>();
+  const paths = new Set<string>();
+  const env = new Set<string>();
+  for (const { module: script, code } of scripts) {
+    if (script.kind === 'opaque') {
+      for (const s of script.specifiers) imports.push({ source: s, name: '*', type: false });
+      // A script that does not parse may still import things; read them off its text.
+      if (script.reason === 'parse-error') for (const m of code.matchAll(SCRIPT_IMPORT)) imports.push({ source: m[1] ?? m[2], name: '*', type: false });
+      for (const e of script.env ?? []) env.add(e);
+      continue;
+    }
+    for (const binding of script.imports.values()) imports.push({ source: binding.source, name: binding.imported, type: binding.type });
+    for (const entry of script.exports.values()) if (entry.source) imports.push({ source: entry.source, name: entry.imported ?? '*', type: entry.type });
+    for (const star of script.stars) imports.push({ source: star.source, name: '*', type: star.type });
+    for (const request of script.requests) if (request.bare) imports.push({ source: request.source, name: '*', type: false });
+    for (const usage of [script.effects.usage, ...[...script.decls.values()].map(d => d.usage)]) {
+      for (const d of usage.dynamic) imports.push({ source: d, name: '*', type: false });
+      for (const t of usage.types) imports.push({ source: t, name: '*', type: true });
+      for (const c of usage.contexts) contexts.add(c);
+      for (const p of usage.paths) paths.add(p);
+      for (const e of usage.env) env.add(e);
+    }
+  }
+  for (const s of [...parts.sources, ...parts.assets]) imports.push({ source: s, name: '*', type: false });
+  return {
+    kind: 'opaque',
+    reason: 'component',
+    content: source,
+    specifiers: styleSpecifiers,
+    imports,
+    contexts: [...contexts],
+    paths: [...paths],
+    env: [...env],
+    jsx: false,
+  };
 };

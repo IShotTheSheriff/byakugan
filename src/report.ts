@@ -35,6 +35,8 @@ export interface GraphSummary {
   files: FileSummary[];
   packages: PackageSummary[];
   tracked: string[];
+  /** Environment variables live code reads by name, and the ones whose values are in the fingerprint. */
+  env: { read: string[]; counted: string[] };
   unresolved: Array<{ specifier: string; from: string }>;
   warnings: string[];
   stats: { projectFiles: number; packageFiles: number; packages: number; liveFragments: number };
@@ -112,6 +114,10 @@ export const summarize = (graph: UsageGraph): GraphSummary => {
     files: files.sort(byKey),
     packages: packageList,
     tracked: tracked.sort(),
+    env: {
+      read: [...graph.env.keys()].filter(k => k !== '*').sort(),
+      counted: [...graph.live.keys()].filter(k => k.startsWith('env:')).map(k => k.slice(4)).sort(),
+    },
     unresolved: graph.unresolved.map(u => ({ specifier: u.specifier, from: graph.fileKey(u.from) })),
     warnings: graph.warnings,
     stats: {
@@ -167,6 +173,10 @@ export const formatGraph = (summary: GraphSummary): string => {
 
   if (summary.tracked.length > 0) out.push('', `tracked by version  ${summary.tracked.join(', ')}`);
   if (summary.inputs.length > 0) out.push('', `inputs  ${list(summary.inputs, 8)}`);
+  if (summary.env.read.length > 0) {
+    out.push('', `env read  ${list(summary.env.read, 8)}`);
+    out.push(`env values counted  ${summary.env.counted.length > 0 ? list(summary.env.counted, 8) : 'none (list them under "env" in byakugan.json)'}`);
+  }
   if (summary.unresolved.length > 0) {
     out.push('', 'unresolved');
     for (const u of summary.unresolved) out.push(`  ${u.specifier}  (from ${u.from})`);

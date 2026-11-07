@@ -9,6 +9,12 @@ export type { FileRecord, LiveFragment, NodeKind, Unresolved } from './graph.ts'
 export { parseModule } from './parse.ts';
 export type { Decl, EsmModule, ExportEntry, ImportBinding, ModuleInfo, OpaqueModule, Usage } from './parse.ts';
 export { loadProject } from './project.ts';
+export { workspaceApps, workspacePatterns } from './workspace.ts';
+export { eachProject, entriesReaching } from './select.ts';
+export { compareBuilds } from './compare.ts';
+export type { BuildDifference } from './compare.ts';
+export type { EachProject, EachResult } from './select.ts';
+export type { WorkspaceApp } from './workspace.ts';
 export type { Config, Framework, LoadProjectOptions, Project } from './project.ts';
 export { Resolver, DEFAULT_MODULARIZE } from './resolve.ts';
 export type { ModularizeRule, PackageInfo, ResolverOptions } from './resolve.ts';

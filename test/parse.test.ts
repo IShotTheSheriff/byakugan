@@ -116,11 +116,11 @@ describe('parseModule', () => {
       declare global { interface Window { foo: number } }
     `);
     assert.match(m.decls.get('Button')?.text ?? '', /displayName/);
-    assert.match(m.effects.text, /'use client'/);
-    assert.match(m.effects.text, /window\.foo/);
-    assert.match(m.effects.text, /register\(Button\)/);
-    assert.match(m.types.text, /declare global/, 'types only, it never runs');
-    assert.ok(!m.effects.text.includes('declare global'));
+    assert.match(m.effects.text, /"directive":"use client"/);
+    assert.match(m.effects.text, /"name":"window"/);
+    assert.match(m.effects.text, /"name":"register"/);
+    assert.match(m.types.text, /"kind":"global"/, 'types only, it never runs');
+    assert.ok(!m.effects.text.includes('"kind":"global"'));
     assert.ok(!m.effects.text.includes('displayName'));
     assert.ok(m.effects.usage.refs.has('register'));
   });
@@ -226,6 +226,16 @@ describe('fragment text: comments and whitespace', () => {
     ['a comment after non-ASCII text', "export const s = 'żółw';\n", "export const s = 'żółw'; /* ą */\n"],
     ['a doc comment in a JS file TypeScript does not check', 'export const f = () => {\n  return 1;\n};\n', 'export const f = () => {\n  /** @type {number} */\n  return 1;\n};\n', 'x.js'],
     ['a comment in CommonJS', "const a = require('a');\nmodule.exports = a;\n", "// legacy\nconst a = require('a'); // the a\nmodule.exports = a;\n", 'x.cjs'],
+    ['spaces around operators', 'export const f = (a: number, b: number) => a+b*2;\n', 'export const f = (a: number, b: number) => a + b * 2;\n'],
+    ['a statement split over lines', 'export const x = call(alpha, beta, gamma);\n', 'export const x = call(\n  alpha,\n  beta,\n  gamma,\n);\n'],
+    ['quote style', "export const s = 'a';\n", 'export const s = "a";\n'],
+    ['quote style in a JSX attribute', view('    <a b="x" />'), view("    <a b='x' />")],
+    ['semicolons', 'export const a = 1;\nexport const b = 2;\n', 'export const a = 1\nexport const b = 2\n'],
+    ['trailing commas', 'export const o = { a: 1, b: [1, 2] };\n', 'export const o = { a: 1, b: [1, 2,], };\n'],
+    ['parentheses a formatter adds', 'export const f = (a: boolean, b: boolean, c: boolean) => a && b || c;\n', 'export const f = (a: boolean, b: boolean, c: boolean) => (a && b) || c;\n'],
+    ['parentheses around an arrow parameter', 'export const f = (a: number[]) => a.map(x => x);\n', 'export const f = (a: number[]) => a.map((x) => x);\n'],
+    ['the way a number is written', 'export const n = 1000;\n', 'export const n = 1_000;\n'],
+    ['a multi-line JSX tag', view('    <a b="1" c="2" />'), view('    <a\n      b="1"\n      c="2"\n    />')],
   ];
   for (const [label, before, after, file = 'x.tsx'] of ignored) {
     test(`${label} does not count`, () => assert.deepEqual(fragments(after, file), fragments(before, file)));
@@ -257,6 +267,12 @@ describe('fragment text: comments and whitespace', () => {
     ['a doc comment in a JS file with @ts-check', '// @ts-check\nexport const f = () => /** @type {string} */ (1);\n', '// @ts-check\nexport const f = () => /** @type {number} */ (1);\n', 'x.js'],
     ['a code change in CommonJS', "const a = require('a');\nmodule.exports = a;\n", "const a = require('b');\nmodule.exports = a;\n", 'x.cjs'],
     ['#__PURE__ in CommonJS', 'module.exports = make();\n', 'module.exports = /* #__PURE__ */ make();\n', 'x.cjs'],
+    ['parentheses that change precedence', 'export const f = (a: number, b: number) => (a + b) * 2;\n', 'export const f = (a: number, b: number) => a + b * 2;\n'],
+    ['parentheses that end an optional chain', 'export const f = (a?: { b: { c: 1 } }) => (a?.b).c;\n', 'export const f = (a?: { b: { c: 1 } }) => a?.b.c;\n'],
+    ['moving #__PURE__ to another call', 'export const x = /* #__PURE__ */ a(b());\n', 'export const x = a(/* #__PURE__ */ b());\n'],
+    ['the escape in a String.raw template', 'export const s = String.raw`\\n`;\n', 'export const s = String.raw`\n`;\n'],
+    ['a number too big to write, against null', 'export const n = 1e999;\n', 'export const n = null;\n'],
+    ['a bigint against a number', 'export const n = 1n;\n', 'export const n = 1;\n'],
   ];
   for (const [label, before, after, file = 'x.tsx', options] of counted) {
     test(`${label} counts`, () => assert.notDeepEqual(fragments(after, file, options), fragments(before, file, options)));

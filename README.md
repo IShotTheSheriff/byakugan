@@ -67,8 +67,8 @@ graph in other formats.
 ```console
 $ byakugan graph -C apps/web
 byakugan · next · 5 entries
-14 project files · 7 files in 3 packages · 36 live fragments
-fingerprint 789d5ce9ae9957e7d92cda9119814fe6dc3cea0b2cfa1da90781c570eab0b7eb
+14 project files · 7 files in 3 packages · 37 live fragments
+fingerprint a7df71be3dd79e4a9bbc2b0c3ade26f395e8d688d6430cfd48cb44df59843544
 
 entries
   apps/web/app/api/health/route.ts
@@ -132,7 +132,7 @@ comes back unaffected.
 ```console
 $ byakugan affected --base origin/main
 affected since bec83380d57e: 1 change reaches the app
-fingerprint d951a427245ee3be4fd79886fab95da733551c0f2db634de0e395e1def4e27ae
+fingerprint 13cb8b5638bfd69a9c3be72f57620ade0174d3254e81918167136f1547d00a91
 
 source: packages/ui/src/cx.ts#cx changed
     apps/web/app/page.tsx (entry)
@@ -152,6 +152,67 @@ changes nothing uses
 `git diff --exit-code`. `--json` prints the result as JSON. `--verbose` lists
 every reason and every ignored change.
 
+`--each <glob>` gives one verdict per matching file instead of one per app,
+for example per test file or per Storybook story. It prints the files a change
+reaches, one per line, and writes them as a JSON list to `each=` in
+`$GITHUB_OUTPUT`:
+
+```console
+$ byakugan affected --base origin/main --each 'src/**/*.test.ts'
+byakugan: 1 of 4 files
+src/add.test.ts
+```
+
+The matched files replace the framework's routes as entries. byakugan walks
+back from every changed fragment over every import that reaches it, so a
+barrel still splits by export: a change to `Card` reaches the test that
+imports `Card` from `./ui` and not the one that imports `Button` from it. A
+change to a config entry, a test runner file (`vitest.config.*`,
+`jest.config.*`, `playwright.config.*`, `vitest.setup.*`, `setupTests.*`) or
+an input such as `package.json` reaches every file. A deleted test reaches
+nothing. Repeat `--each` for more globs.
+
+`--workspace` runs `affected` (or `hash`) once per app in the workspace at
+`-C`, which defaults to the current directory:
+
+```console
+$ byakugan affected --workspace --base origin/main
+apps/docs  unaffected
+apps/web   affected    source: packages/ui/src/cx.ts#cx changed
+```
+
+byakugan reads the workspace list from `package.json` or
+`pnpm-workspace.yaml`. A package counts as an app when byakugan detects a
+framework or a Cloudflare Worker in it, when it has a `byakugan.json`, or when
+it is not a library. A library is a package that another workspace package
+lists in `dependencies`, `peerDependencies` or `optionalDependencies`, or lists
+only in `devDependencies` and that has no `start` script. A server that an
+end-to-end test package lists in `devDependencies` and starts with
+`npm start` is an app. `packages/ui` is none of these, so
+it gets no verdict of its own; its changes show up in the apps that use it. An
+API whose types the web app imports (Hono RPC) is a dependency of the web app,
+so give it a `byakugan.json` to get a verdict. An app whose graph fails, for
+example over an invalid `byakugan.json`, counts as affected. With
+`--workspace`, `--manifest` and `--base-manifest` name directories that hold
+one manifest per app.
+
+### `byakugan compare <base> <fresh>`
+
+Compares two build outputs, such as two `.next` directories, and exits with 1
+when they differ. It leaves out what changes between any two builds of the
+same code: the build ID, the server action and preview mode secrets, the
+checkout path Next.js records, and in Next.js output the caches and traces.
+Source maps embed the
+source, so a comment or formatting edit changes them. `compare` skips `.map`
+files unless you pass `--maps`.
+
+This is how you check byakugan itself. When `affected` says unaffected, a
+build of the change should match a build of the base. On `bobr`, a Next.js 16
+monorepo built with Turbopack, two builds of one commit matched. A Prettier run
+over 14 used files with other settings matched too, apart from source maps. A
+change to a function the app uses gave 8 different files. Webpack builds are
+untested.
+
 ### `byakugan why <target>`
 
 Prints the shortest import chain from an entry to a file (`src/lib/utils.ts`),
@@ -161,7 +222,10 @@ an export (`src/lib/utils.ts#formatDate`), a package file
 ## CI recipes
 
 In GitHub Actions, `hash` and `affected` write `fingerprint=` and `affected=`
-to `$GITHUB_OUTPUT`. Warnings (imports byakugan cannot follow, Tailwind
+to `$GITHUB_OUTPUT`, and `affected` adds a table to the job summary. With
+`--workspace`, they also write `apps=`, a JSON list of the affected app
+directories, and `fingerprints=`, a JSON object from app directory to
+fingerprint. Warnings (imports byakugan cannot follow, Tailwind
 failures) go to stderr, so stdout stays a fingerprint or JSON. `affected` also
 lists them under "warnings".
 
@@ -182,6 +246,55 @@ rather than into the script itself, so a branch name cannot inject shell code.
 - if: steps.web.outputs.affected == 'true'
   run: npm run build --workspace web
 ```
+
+### Build only the affected apps of a monorepo
+
+```yaml
+jobs:
+  affected:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.byakugan.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: npm ci
+      - id: byakugan
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: npx --no-install byakugan affected --workspace --base "origin/$BASE_REF"
+  build:
+    needs: affected
+    if: needs.affected.outputs.apps != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: ${{ fromJSON(needs.affected.outputs.apps) }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: npm ci
+      - env:
+          APP: ${{ matrix.app }}
+        run: npm run build --prefix "$APP"
+```
+
+App directories come from the repository, so the build step reads the app
+from `env` too.
+
+### Run only the tests a change reaches
+
+```yaml
+- id: tests
+  env:
+    BASE_REF: ${{ github.base_ref }}
+  run: npx --no-install byakugan affected --base "origin/$BASE_REF" --each 'src/**/*.test.ts' > tests.txt
+- if: steps.tests.outputs.affected == 'true'
+  run: xargs npx vitest run < tests.txt
+```
+
+Check `affected` before you run the list. `vitest run` with no file arguments
+runs every test.
 
 ### Reuse a build when nothing it uses changed
 
@@ -216,6 +329,30 @@ Save a manifest on `main`, compare with it on pull requests:
   run: npx --no-install byakugan affected -C apps/web --base-manifest .byakugan/web.json
 ```
 
+### Check byakugan against real builds
+
+Before you skip builds on byakugan's word, run it in shadow mode for a while.
+Build every pull request, and when byakugan says unaffected, also build the
+merge base and compare the two:
+
+```yaml
+- id: web
+  env:
+    BASE_REF: ${{ github.base_ref }}
+  run: npx --no-install byakugan affected -C apps/web --base "origin/$BASE_REF"
+- run: npm run build --workspace web
+- if: steps.web.outputs.affected == 'false'
+  env:
+    BASE_REF: ${{ github.base_ref }}
+  run: |
+    git worktree add ../base "$(git merge-base "origin/$BASE_REF" HEAD)"
+    (cd ../base && npm ci && npm run build --workspace web)
+    npx --no-install byakugan compare ../base/apps/web/.next apps/web/.next
+```
+
+A failing `compare` means byakugan missed an input. Its output names the
+files that differ.
+
 See [examples/github-actions.yml](examples/github-actions.yml) for a full
 workflow.
 
@@ -230,6 +367,24 @@ workflow.
      `mdx-components`, `next.config.*`, and files that plugins load by
      convention (next-intl `i18n/request.ts`, Sentry `sentry.*.config.ts`).
    - Vite: the `<script src>` tags in `index.html`, and `vite.config.*`.
+   - React Router v7 and Remix: `root`, `entry.client`, `entry.server`,
+     `routes.ts` and `routes/**`.
+   - Nuxt: `app.vue`, `error.vue`, `pages`, `layouts`, `plugins`,
+     `middleware`, `server`, and `components`, `composables` and `utils`,
+     since Nuxt imports those for you. Both the root and Nuxt 4's `app/`
+     layout work. A file the config names through an alias, such as
+     `css: ['~/assets/main.css']`, counts. With `@nuxt/content`, `content/**`
+     is an input.
+   - SvelteKit: `src/routes/**`, `src/hooks.*`, `src/params`, the service
+     worker, `svelte.config.js` and `vite.config.*`. `src/app.html` and
+     `static/**` are inputs.
+   - Astro: `src/pages/**`, the middleware, the content collection config and
+     `astro.config.*`. `src/content/**` and `public/**` are inputs.
+   - React Native and Expo: every file under `app/` with Expo Router, then
+     `index.*`, `App.*`, `app.config.*` and `metro.config.*`. An import counts
+     every platform variant that exists, such as `Button.ios.tsx` and
+     `Button.android.js`, because Metro picks one per platform. Deleting a
+     variant counts too.
    - Anything else: `package.json` fields, then `{index,main,server,app}.*` in
      the root or in `src/`.
 
@@ -244,12 +399,21 @@ workflow.
    `declare global` and `declare module` blocks form a separate types fragment.
    byakugan records, per declaration, which top-level names it refers to.
 
-   A fragment's hash leaves out comments. Each run of whitespace outside
-   strings counts as one space or one line break. So editing a comment or
-   reindenting a function changes nothing, and neither does a comment that
-   labels an argument, as in `f(/* force */ true)`. Whitespace in JSX text
-   counts the way the JSX compiler keeps it. These comments still count,
-   because they change what a tool does:
+   A `.vue`, `.svelte` or `.astro` file counts whole, since its template uses
+   its script in ways byakugan does not read. Its `<script>` blocks (and
+   Astro's frontmatter) are parsed, and their imports count by imported name,
+   so a barrel still splits. So do `<style>` imports, `<script src>` and asset
+   paths in the template such as `src="./logo.png"`.
+
+   A fragment's hash comes from its syntax tree, not its text. Comments,
+   whitespace, quote style, semicolons, trailing commas, parentheses that do
+   not change precedence and the way a number is written leave no trace. So a
+   Prettier run with other settings changes nothing, and neither does a
+   comment that labels an argument, as in `f(/* force */ true)`. A line break
+   that changes the code, as after `return`, still counts, because the parser
+   reads it. Whitespace in JSX text counts the way the JSX compiler keeps it.
+   These comments still count, each with the code after it, because they change
+   what a tool does:
 
    - minifier and bundler hints: `#__PURE__`, `webpackChunkName`, `@vite-ignore`
    - legal comments: `/*!`, `//!`, `@license`, `@preserve`
@@ -297,7 +461,14 @@ Besides code, the fingerprint covers:
   names in a string (a PostCSS plugin, a Turbopack loader, `transpilePackages`);
 - the CSS Tailwind generates for each root stylesheet;
 - for `import type` from an npm package, the package version and its `@types`
-  version.
+  version;
+- the values of environment variables that live code reads by name and the
+  framework inlines at build time: `NEXT_PUBLIC_*` for Next.js, `VITE_*` for
+  Vite and React Router, `PUBLIC_*` for SvelteKit and Astro, `EXPO_PUBLIC_*`
+  for Expo, and every name a SvelteKit app imports from `$env/static/public`
+  or `$env/static/private`. `env` in `byakugan.json` adds more.
+  `byakugan graph` lists every variable live code reads and the ones whose
+  values count.
 
 On a Next.js 14 app with 58 npm packages, a run takes 0.7 s and reaches 43
 project files and 222 package files. `lucide-react` ships about 1,700 icon
@@ -457,12 +628,13 @@ Everything is optional. Put a `byakugan.json` next to the app's `package.json`:
 | `entry`             | Extra entry globs, added to the detected ones.                                                                  |
 | `inputs`            | Extra globs hashed as whole files.                                                                              |
 | `packages`          | Packages tracked by installed version.                                                                          |
-| `framework`         | `next`, `vite`, `react-router` or `none`. Overrides detection; `none` disables framework entries.               |
+| `framework`         | `next`, `vite`, `react-router`, `nuxt`, `sveltekit`, `astro`, `react-native` or `none`. Overrides detection; `none` disables framework entries. |
 | `conditions`        | Export conditions tried first. Use `["source"]` when workspace packages point `exports` at `dist`.              |
 | `modularizeImports` | Same shape as the Next.js option. Merged over the built-in `lodash` rule.                                       |
 | `jsxImportSource`   | Defaults to `compilerOptions.jsxImportSource` from `tsconfig.json`, then `react`.                               |
 | `generated`         | Git-ignored files the build generates, such as a Prisma client. Git mode skips its "ignored by git" reason for them. List the generator's inputs in `inputs`. |
 | `virtual`           | Specifiers a bundler plugin provides (globs), such as `~icons/**` for unplugin-icons. They no longer count as unresolved. |
+| `env`               | Environment variables whose values count when live code reads them (globs over names), such as `API_*`. |
 
 byakugan rejects a `byakugan.json` that is not valid JSON or has a field of
 the wrong type, for example a string where a list belongs.
@@ -479,13 +651,14 @@ These cost extra builds:
   so byakugan rewrites `import { partition } from 'lodash'` to
   `lodash/partition`, as Next.js does by default. A default import
   (`import _ from 'lodash'`) uses the whole file.
-- **Some formatting counts.** Spaces beside brackets, commas and semicolons
-  do not, but a statement split over two lines or `a+b` written as `a + b`
-  changes the hash, so a formatter run over a used file usually counts.
 - **Names, not types.** There is no type checker. A local variable that shadows
   an import counts as a use of that import. A declaration reached through
   `import type` counts whole, so a function body change counts even when its
   type stays the same.
+- **Single-file components count whole.** A `.vue`, `.svelte` or `.astro`
+  file counts as one fragment, and every name its scripts import counts as
+  used. Nuxt's `components`, `composables` and `utils` count whether a page
+  uses them or not, since Nuxt imports them for you.
 - **Modules a barrel loads still run.** Their top-level statements count, and so
   does everything those statements reference.
 - **Git mode sees dependency updates per package.** Use a manifest or the
@@ -519,28 +692,44 @@ These cost extra builds:
   `public/shared -> ../assets` or `app/blog -> ../docs`, has its files listed
   under the link's path. Git mode maps changes under the target to those paths.
 
+- **A top-level initializer that calls a function runs with its module.**
+  `export const store = createStore()` counts whenever the module runs, used
+  or not, because a bundler keeps the call. Mark the call `/*#__PURE__*/` when
+  it only builds a value.
+
 These can miss a change:
 
-- **Top-level initializers are assumed pure.** `export const store =
-  createStore()` counts only when `store` is used. Bare top-level statements
-  always count.
+- **Some top-level calls are assumed to only build a value.** Calls into
+  `react`, `zod`, `class-variance-authority`, `tailwind-variants`,
+  `styled-components`, `hono` and a few similar packages, built-ins such as
+  `Object.freeze`, and calls marked `/*#__PURE__*/` count only when their
+  result is used. A function you pass them, as in `['a'].map(register)`,
+  counts when its body calls something. byakugan assumes that reading a
+  property runs no getter and that turning a value into a string or number
+  runs no `toString` or `valueOf` of your own, so `String(o)` with a custom
+  `toString` that registers something is missed.
 - **Paths byakugan cannot read off the code.** An `import()` whose specifier
   starts with an alias (`` `@/messages/${l}.json` ``) or is fully computed,
   and file paths built from variables. byakugan warns about such imports. Add
   the files to `inputs`.
 - **Build-time data and environment.** Data fetched during the build (a CMS, a
-  database, `fetch` in `generateStaticParams`) and environment variables that
-  CI sets rather than `.env*` files are not files byakugan can hash. Add them
-  to your cache key.
-- **Comments in build output.** A build that keeps comments, such as `tsc` or
-  Rollup without a minifier, emits different files after a comment edit that
-  byakugan reports as unaffected. The code runs the same. Lint and format
-  checks read comments and formatting, and ESLint obeys
-  `// eslint-disable-next-line`. Key such checks on the files under `inputs`,
-  not on the graph.
-- **Declaration order.** Moving `const a = 1` below the code that reads it at
-  the top level, or a base class below its subclass, throws at runtime, but
-  each declaration's text is unchanged, so nothing counts.
+  database, `fetch` in `generateStaticParams`) is not something byakugan can
+  hash. Neither is an environment variable that code reads by a computed name
+  or that config files read, such as `process.env.BASE_PATH` in
+  `next.config.ts`, unless `env` names it. Add them to your cache key. Git
+  mode compares no values at all, since the base commit has no environment.
+  The fingerprint and manifests do, with the values of the job that runs
+  byakugan, so run it with the build's environment.
+- **Comments and formatting in build output.** A build that keeps comments
+  or layout, such as `tsc` or Rollup without a minifier, emits different files
+  after an edit byakugan reports as unaffected. So do source maps, whose line
+  numbers move. The code runs the same. Lint and format checks read comments
+  and formatting, and ESLint obeys `// eslint-disable-next-line`. Key such
+  checks on the files under `inputs`, not on the graph.
+- **Declaration order behind a function call.** Moving `const a = 1` below
+  `const b = a`, or a base class below its subclass, counts. A function called
+  at the top level that reads a binding declared below the call does not,
+  whether it is a `function` declaration or `const f = () => ...`.
 - **`verbatimModuleSyntax` is read from the app's tsconfig chain only.** A
   workspace package that sets it in its own tsconfig, while the app does not,
   is parsed as if it were off: `import { type X }` there does not run the
@@ -581,6 +770,10 @@ byakugan reads a pull request's files, so treat its input as untrusted.
 - **Globs and patterns from the repository run in linear time.** byakugan
   matches them one path segment at a time, instead of compiling them into a
   regex that can backtrack for minutes.
+- **Manifests hold a hash of each counted environment variable**, never the
+  value. A short secret can still be guessed from its hash, so keep secrets
+  out of `env`. Public `NEXT_PUBLIC_*` and `VITE_*` values end up in the
+  bundle anyway.
 - **Text output escapes control characters**, so a file name holding terminal
   escape sequences prints as plain text. Mermaid and DOT output escape quotes
   and line breaks, so a file name cannot add a directive.
