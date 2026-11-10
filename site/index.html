@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>byakugan · CI that skips what a change cannot reach</title>
+<meta name="description" content="byakugan builds the graph of code a Next.js, React or TypeScript app uses, down to single exports, so CI skips end-to-end tests and builds a pull request cannot reach.">
+<meta property="og:title" content="byakugan">
+<meta property="og:description" content="The graph of code your app uses, for CI that skips what a change cannot reach.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23F4EFE6' stroke='%231C1917' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23E8590C'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,300..600&family=JetBrains+Mono:wght@400..600&family=Doto:wght@700..900&family=Manrope:wght@400..700&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="paper.css">
+<script src="paper.js" defer></script>
+<style>
+  .scroll { overflow-x: auto; }
+  .table code, .prose code, .lede code, li code, p code, dd code { font: 500 .88em/1 var(--mono); padding: 2px 5px; border-radius: 5px; background: var(--card-2); box-shadow: var(--hairline); white-space: nowrap; }
+  .list code, .steps code { white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+  .grid > * { min-width: 0; }
+  .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 28px; }
+  .steps > li { counter-increment: step; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 16px; }
+  .steps > li::before { content: counter(step); display: grid; place-items: center; width: 34px; height: 34px; border: 1.5px solid var(--ink); border-radius: 8px; font: 500 14px/1 var(--mono); background: var(--card); }
+  .steps p { margin: 6px 0 0; color: var(--ink-2); }
+  .recipe + .recipe { margin-top: 20px; }
+  .recipe .code { margin-top: 16px; font-size: 13.5px; }
+  .recipe p { color: var(--ink-2); margin: 8px 0 0; }
+  .yes { color: var(--red); font-weight: 600; } .no { color: var(--green); font-weight: 600; }
+  .kanji { font: 340 clamp(64px, 9vw, 104px)/1 var(--serif); letter-spacing: .04em; }
+  .install { display: inline-flex; align-items: center; gap: 10px; margin-top: 28px; padding: 10px 16px; border-radius: 10px; background: var(--card); box-shadow: var(--hairline), var(--lift-1); font: 500 14.5px/1 var(--mono); }
+  .install b { color: var(--accent); font-weight: 500; }
+  .list { margin: 12px 0 0; padding-left: 20px; color: var(--ink-2); } .list li + li { margin-top: 8px; }
+  .tile ul { margin: 14px 0 0; padding-left: 18px; } .tile li + li { margin-top: 6px; }
+  .sum { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; text-align: center; }
+  .sum b { display: block; font: 340 44px/1 var(--serif); letter-spacing: -0.03em; }
+  .sum span { font-size: 14px; color: var(--ink-2); }
+  @media (max-width: 720px) { .sum { grid-template-columns: 1fr; } .panel { padding: 18px; } }
+</style>
+</head>
+<body class="dots">
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="wordmark" href="#top">byakugan</a>
+    <nav class="nav-pill" aria-label="Main">
+      <i class="nav-hi" aria-hidden="true"></i>
+      <a class="nav-item" href="#why">Why</a><a class="nav-item" href="#how">How it works</a><a class="nav-item" href="#start">Start</a><a class="nav-item" href="#recipes">Recipes</a><a class="nav-item" href="#faq">FAQ</a>
+    </nav>
+    <a class="key key-sm" href="https://github.com/IShotTheSheriff/byakugan">GitHub <svg class="arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap">
+      <h1 class="hero-title">See what <span class="dotword" data-words="every PR,an agent,a commit"><span>every PR</span></span><br>really touches.</h1>
+      <p class="lede">byakugan builds the graph of code your Next.js app uses, down to single exports. CI asks it one question per app: can this pull request change what the app does? When the answer is no, skip the end-to-end tests and the build.</p>
+      <div class="actions">
+        <a class="key key-lg" href="#start">Get started <svg class="arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
+        <a class="link" href="#how">See how it works</a>
+      </div>
+      <div class="install"><b>$</b> npm install --save-dev byakugan-cli</div>
+    </div>
+  </section>
+
+  <section class="section" id="what">
+    <div class="wrap narrow">
+      <div class="section-head reveal">
+        <h2 class="display">One question per <em>app.</em></h2>
+        <p class="lede">Does this branch reach it? byakugan answers with the import chain as proof.</p>
+      </div>
+      <div class="panel reveal">
+        <span class="eyebrow">A pull request that edits one helper in a shared UI package</span>
+<pre class="code"><span class="cm">$</span> byakugan affected --workspace --base origin/main
+apps/admin  <span class="fn">unaffected</span>
+apps/docs   <span class="fn">unaffected</span>
+apps/web    <span class="kw">affected</span>    source: packages/ui/src/cx.ts#cx changed
+
+<span class="cm">$</span> byakugan affected -C apps/web --base origin/main
+<span class="kw">affected</span> since bec83380d57e: 1 change reaches the app
+
+source: packages/ui/src/cx.ts#cx changed
+    apps/web/app/page.tsx (entry)
+    └ apps/web/app/page.tsx#Page
+    └ apps/web/app/page.tsx#Button (import from "@acme/ui")
+    └ packages/ui/src/index.ts › Button
+    └ packages/ui/src/Button.tsx#Button
+    └ packages/ui/src/Button.tsx#cx (import from "./cx")
+    └ packages/ui/src/cx.ts#cx
+
+changes nothing uses
+  packages/ui/src/Modal.tsx  (Modal)
+  README.md</pre>
+        <p class="muted small" style="margin:16px 0 0">Three apps depend on <code>packages/ui</code>. One of them renders the component that calls <code>cx</code>. The other two keep their last test run.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="name">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 class="display">The eye that sees <em>through.</em></h2>
+        <p class="lede">Where the name comes from, and why it fits.</p>
+      </div>
+      <div class="grid grid-2">
+        <div class="tile lilac reveal" style="--i:0">
+          <svg viewBox="0 0 320 170" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="10" y="10" width="300" height="150" rx="10" fill="var(--card)"/>
+            <path class="draw" pathLength="1" d="M50 85 C 95 35, 225 35, 270 85 C 225 135, 95 135, 50 85 Z"/>
+            <circle cx="160" cy="85" r="30"/>
+            <circle cx="160" cy="85" r="7" fill="var(--accent)" stroke="none"/>
+            <g stroke-dasharray="3 5" opacity=".7">
+              <path d="M160 55 V28"/><path d="M160 115 V142"/><path d="M186 70 L214 50"/><path d="M134 70 L106 50"/><path d="M186 100 L214 120"/><path d="M134 100 L106 120"/>
+            </g>
+            <g font-family="JetBrains Mono, monospace" font-size="11" fill="currentColor" stroke="none">
+              <text x="24" y="32">白眼</text><text x="236" y="150">byakugan</text>
+            </g>
+          </svg>
+          <h3 class="title" style="margin-top:20px">The white <em>eye</em></h3>
+          <p class="muted small" style="margin:8px 0 0">Byakugan (白眼, "white eye") is the eye technique of the Hyūga clan in the manga and anime <em>Naruto</em>. Its user sees in almost every direction at once, sees through walls, and sees the chakra network, the paths along which energy flows through a body. A Hyūga fighter does not guess where to strike. They look at the network and hit the one point that matters.</p>
+        </div>
+        <div class="tile sage reveal" style="--i:1">
+          <svg viewBox="0 0 320 170" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="10" y="10" width="300" height="150" rx="10" fill="var(--card)"/>
+            <rect x="28" y="70" width="64" height="30" rx="6"/>
+            <rect x="128" y="30" width="64" height="30" rx="6"/>
+            <rect x="128" y="110" width="64" height="30" rx="6" stroke-dasharray="4 4" opacity=".55"/>
+            <rect x="228" y="30" width="64" height="30" rx="6"/>
+            <path class="draw" pathLength="1" d="M92 85 C 110 85, 110 45, 128 45"/>
+            <path class="draw" pathLength="1" d="M192 45 H228"/>
+            <circle cx="260" cy="45" r="5" fill="var(--accent)" stroke="none"/>
+            <g font-family="JetBrains Mono, monospace" font-size="11" fill="currentColor" stroke="none">
+              <text x="40" y="89">page</text><text x="138" y="49">barrel</text><text x="140" y="129" opacity=".55">Modal</text>
+            </g>
+          </svg>
+          <h3 class="title" style="margin-top:20px">The same idea, for <em>code</em></h3>
+          <p class="muted small" style="margin:8px 0 0">An app is a network too. Imports flow from a page through barrel files, across package boundaries and into <code>node_modules</code>. byakugan looks through those walls and traces every path from an entry file to the declarations it uses. A change either sits on a path or it does not. That is the whole verdict.</p>
+        </div>
+      </div>
+      <p class="center muted small reveal" style="margin-top:24px">byakugan is an open source tool and is not affiliated with <em>Naruto</em> or its publishers. The npm package is <code>byakugan-cli</code>.</p>
+    </div>
+  </section>
+
+  <section class="section" id="why">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 class="display">CI was sized for <em>people.</em></h2>
+        <p class="lede">A software factory of coding agents opens pull requests all day. Each one pays for the whole pipeline.</p>
+      </div>
+      <div class="grid grid-3">
+        <div class="tile rose reveal" style="--i:0">
+          <h3 class="title">More pull <em>requests</em></h3>
+          <p class="muted small" style="margin:8px 0 0">A team with agents merges many small changes: a copy fix, one refactored helper, a dependency bump. Each push runs installs, builds and a browser suite that takes longer than writing the change did.</p>
+        </div>
+        <div class="tile sky reveal" style="--i:1">
+          <h3 class="title">Coarse <em>answers</em></h3>
+          <p class="muted small" style="margin:8px 0 0">Turborepo, Nx and path filters decide per package or per file. Someone edits <code>Modal</code> in <code>@acme/ui</code>, and every app that depends on <code>@acme/ui</code> rebuilds, whether it renders <code>Modal</code> or not. A lodash release touches <code>filter</code>, and everything rebuilds again.</p>
+        </div>
+        <div class="tile sand reveal" style="--i:2">
+          <h3 class="title">Slow <em>loops</em></h3>
+          <p class="muted small" style="margin:8px 0 0">An agent waits on CI before it can merge or try again. A 25-minute suite on a change that could not reach the app is 25 minutes of queue for every pull request behind it, and runner minutes on the bill.</p>
+        </div>
+      </div>
+
+      <div class="narrow panel reveal" style="margin-top:40px">
+        <span class="eyebrow">An example with made-up round numbers</span>
+        <p class="h4" style="margin-bottom:18px">What a finer answer is worth</p>
+        <div class="sum">
+          <div><b>200</b><span>pull requests a day</span></div>
+          <div><b>25 min</b><span>end-to-end suite per app</span></div>
+          <div><b>60%</b><span>cannot reach the app under test</span></div>
+        </div>
+        <p class="muted" style="margin:20px 0 0">200 × 25 minutes is 83 runner hours a day for one app. If 60% of those pull requests cannot reach it, 50 of the 83 hours test nothing new. The share depends on your repository. Run byakugan in shadow mode for two weeks and you have your own number before you skip a single job.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="how">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 class="display">Follow the <em>imports.</em></h2>
+        <p class="lede">byakugan walks from the app's entry files, symbol by symbol, and hashes exactly what it reaches.</p>
+      </div>
+
+      <figure class="figure panel reveal">
+        <div class="scroll">
+        <svg viewBox="0 0 880 330" style="min-width:720px;width:100%" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Import graph from app/page.tsx through a barrel to Button and cx, and into lodash/partition. Modal and lodash/filter are not reached.">
+          <g font-family="JetBrains Mono, monospace" font-size="11" fill="currentColor" stroke="none">
+            <text x="20" y="24" opacity=".6">entry</text><text x="246" y="24" opacity=".6">barrel</text><text x="470" y="24" opacity=".6">declarations</text><text x="700" y="24" opacity=".6">what they call</text>
+          </g>
+          <rect x="20" y="130" width="170" height="44" rx="8" fill="var(--card-2)"/>
+          <rect x="246" y="60" width="170" height="44" rx="8" fill="var(--card-2)"/>
+          <rect x="470" y="40" width="170" height="44" rx="8" fill="var(--card-2)"/>
+          <rect x="700" y="40" width="160" height="44" rx="8" fill="var(--card-2)"/>
+          <rect x="470" y="106" width="170" height="44" rx="8" stroke-dasharray="4 5" opacity=".5"/>
+          <rect x="246" y="220" width="170" height="44" rx="8" fill="var(--card-2)"/>
+          <rect x="470" y="198" width="170" height="44" rx="8" fill="var(--card-2)"/>
+          <rect x="470" y="264" width="170" height="44" rx="8" stroke-dasharray="4 5" opacity=".5"/>
+          <path class="draw" pathLength="1" d="M190 146 C 218 146, 218 82, 246 82"/>
+          <path class="draw" pathLength="1" d="M416 76 C 443 76, 443 62, 470 62"/>
+          <path class="draw" pathLength="1" d="M640 62 H700"/>
+          <path class="draw" pathLength="1" d="M190 158 C 218 158, 218 242, 246 242"/>
+          <path class="draw" pathLength="1" d="M416 236 C 443 236, 443 220, 470 220"/>
+          <path d="M416 90 C 443 90, 443 128, 470 128" stroke-dasharray="3 6" opacity=".4"/>
+          <path d="M416 250 C 443 250, 443 286, 470 286" stroke-dasharray="3 6" opacity=".4"/>
+          <circle cx="848" cy="52" r="5" fill="var(--accent)" stroke="none"/>
+          <g font-family="JetBrains Mono, monospace" font-size="12" fill="currentColor" stroke="none">
+            <text x="34" y="157">app/page.tsx</text>
+            <text x="260" y="87">ui/src/index.ts</text>
+            <text x="484" y="67">Button.tsx#Button</text>
+            <text x="714" y="67">cx.ts#cx</text>
+            <text x="484" y="133" opacity=".5">Modal.tsx#Modal</text>
+            <text x="260" y="247">lodash (import)</text>
+            <text x="484" y="225">lodash/partition.js</text>
+            <text x="484" y="291" opacity=".5">lodash/filter.js</text>
+          </g>
+          <g font-family="JetBrains Mono, monospace" font-size="11" fill="var(--accent)" stroke="none">
+            <text x="756" y="104">edited here</text>
+          </g>
+          <path d="M848 60 V 92 H 836" stroke="var(--accent)" stroke-width="1"/>
+        </svg>
+        </div>
+        <figcaption>Solid boxes are in the graph. Dashed ones sit in the same files and packages, and nothing reaches them. An edit to <code>cx</code> lands on a path, so the app is affected. An edit to <code>Modal</code> does not.</figcaption>
+      </figure>
+
+      <div class="narrow panel reveal" style="margin-top:28px">
+        <ol class="steps">
+          <li><div><p class="h4">Entries</p><p>For Next.js, every App Router file (<code>page</code>, <code>layout</code>, <code>route</code>, <code>loading</code>, <code>error</code>, metadata routes), everything under <code>pages/</code>, <code>middleware</code> or <code>proxy</code>, <code>instrumentation</code> and <code>next.config.*</code>. Every export of an entry counts as used.</p></div></li>
+          <li><div><p class="h4">Fragments</p><p>The oxc parser splits each reached module into fragments: top-level declarations, import bindings, export specifiers, <code>export *</code> lines and the module's side effects. byakugan records which top-level names each declaration refers to.</p></div></li>
+          <li><div><p class="h4">The walk</p><p>A used export leads to its declaration. The declaration leads to the names it refers to. An import leads to the export it resolves to, through tsconfig <code>paths</code>, package <code>exports</code>, barrels, <code>import()</code>, <code>next/dynamic</code> and workspace symlinks. An <code>import type</code> is followed through types only, so the target module does not run.</p></div></li>
+          <li><div><p class="h4">Modules that run</p><p>Importing a module runs it, so its top-level statements count even when no export is used. Packages with <code>"sideEffects": false</code> are skipped unless a binding is used, as bundlers do.</p></div></li>
+          <li><div><p class="h4">The hash</p><p>The fingerprint is SHA-256 over the sorted (key, hash) pairs of every live fragment. A fragment's hash comes from its syntax tree, so comments, whitespace, quote style and a Prettier run with other settings leave no trace.</p></div></li>
+        </ol>
+      </div>
+
+      <div class="grid grid-2" style="margin-top:28px">
+        <div class="panel reveal" style="--i:0">
+          <span class="eyebrow">Beyond imports</span>
+          <p class="h4">What a Next.js app depends on without importing it</p>
+          <ul class="list">
+            <li><code>import(`../messages/${locale}.json`)</code> counts every file the pattern matches.</li>
+            <li><code>localFont({ src: './fonts/brand.woff2' })</code> counts the font file.</li>
+            <li><code>join(process.cwd(), 'content', slug)</code> counts every file under <code>content/</code>.</li>
+            <li><code>'use server'</code> counts every export, since each can be an endpoint.</li>
+            <li>Tailwind: byakugan runs the project's own Tailwind and hashes the CSS it generates.</li>
+            <li><code>NEXT_PUBLIC_*</code> values that live code reads are part of the fingerprint.</li>
+          </ul>
+        </div>
+        <div class="panel reveal" style="--i:1">
+          <span class="eyebrow">Besides code</span>
+          <p class="h4">What else is in the fingerprint</p>
+          <ul class="list">
+            <li><code>package.json</code>, the tsconfig chain, <code>.env*</code> and <code>public/**</code>.</li>
+            <li>The installed version of tools that read the app without being imported: <code>next</code>, <code>react</code>, <code>typescript</code>, <code>tailwindcss</code>, <code>postcss</code>.</li>
+            <li>The used files of each npm package. <code>import { partition } from 'lodash'</code> is 123 of lodash's roughly 1,050 files.</li>
+            <li>Keys are relative paths and <code>npm:&lt;package&gt;/&lt;file&gt;</code>, so fingerprints match across machines and pnpm store layouts.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="results">
+    <div class="wrap narrow">
+      <div class="section-head reveal">
+        <h2 class="display">What counts, and what <em>doesn't.</em></h2>
+        <p class="lede">Results on a create-next-app project with shadcn, Tailwind 4 and lucide-react.</p>
+      </div>
+      <div class="panel reveal scroll">
+        <table class="table">
+          <thead><tr><th>Change</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>A used shadcn component (<code>DialogContent</code>)</td><td class="yes">affected</td></tr>
+            <tr><td>An unused export in the same file (<code>DialogFooter</code>)</td><td class="no">unaffected</td></tr>
+            <tr><td><code>README.md</code>, a new test file, <code>components.json</code></td><td class="no">unaffected</td></tr>
+            <tr><td>A comment, or a Prettier run with other settings</td><td class="no">unaffected</td></tr>
+            <tr><td>A file nobody imports: new text, no new Tailwind classes</td><td class="no">unaffected</td></tr>
+            <tr><td>A file nobody imports: a class no other file uses</td><td class="yes">affected</td></tr>
+            <tr><td><code>messages/pl.json</code> edited, <code>messages/de.json</code> added</td><td class="yes">affected</td></tr>
+            <tr><td>A blog post read with <code>fs</code>, a new post</td><td class="yes">affected</td></tr>
+            <tr><td>The <code>next/font/local</code> font file</td><td class="yes">affected</td></tr>
+            <tr><td>An unused export in a <code>'use server'</code> file</td><td class="yes">affected</td></tr>
+            <tr><td>An unused export in a <code>'use client'</code> file</td><td class="no">unaffected</td></tr>
+            <tr><td>The same with <code>--strict</code>, when a server component imports the file</td><td class="yes">affected</td></tr>
+            <tr><td>A new page, <code>middleware.ts</code>, an API route</td><td class="yes">affected</td></tr>
+            <tr><td>A lucide icon the app renders, patched in node_modules</td><td class="yes">affected</td></tr>
+            <tr><td>A lucide icon nothing renders</td><td class="no">unaffected</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout reveal" style="margin-top:24px"><p class="h4">Speed</p><p>On a Next.js app with 58 npm packages a run takes 0.7 s. Eight apps over one 6,000-module shared package take about 8 s with <code>--workspace</code>, because a shared file is parsed once.</p></div>
+    </div>
+  </section>
+
+  <section class="section" id="modes">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 class="display">Two promises, your <em>pick.</em></h2>
+        <p class="lede">A verdict promises the same behavior, or the same build output too.</p>
+      </div>
+      <div class="grid grid-2">
+        <div class="tile mint reveal" style="--i:0">
+          <span class="tok hot" style="align-self:flex-start">behavior</span>
+          <h3 class="title" style="margin-top:16px">The app runs the <em>same</em></h3>
+          <p class="muted small" style="margin:8px 0 0">The default. byakugan counts the code the app can run. Use it to skip end-to-end tests, unit tests and visual tests.</p>
+        </div>
+        <div class="tile sand reveal" style="--i:1">
+          <span class="tok" style="align-self:flex-start">--strict</span>
+          <h3 class="title" style="margin-top:16px">The build is the <em>same</em></h3>
+          <p class="muted small" style="margin:8px 0 0">Also counts code the bundler ships but nothing runs. Next.js ships a <code>'use client'</code> module whole when a server component imports it. Use it to reuse a build artifact or skip a deploy.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="start">
+    <div class="wrap narrow">
+      <div class="section-head reveal">
+        <h2 class="display">Start with the <em>doctor.</em></h2>
+        <p class="lede">Three commands take you from install to a first verdict.</p>
+      </div>
+      <div class="panel reveal">
+<pre class="code">npm install --save-dev byakugan-cli
+
+<span class="cm"># find the apps and what needs fixing</span>
+npx --no-install byakugan doctor --workspace
+
+<span class="cm"># which apps does this branch change?</span>
+npx --no-install byakugan affected --workspace --base origin/main</pre>
+        <p class="muted small" style="margin:14px 0 0">With one app, leave out <code>--workspace</code> and run the commands in the app directory. The command needs Node.js 22.12 or newer. <code>npx --no-install</code> matters: an unrelated npm package is named <code>byakugan</code>.</p>
+      </div>
+
+      <div class="panel reveal" style="margin-top:20px">
+        <span class="eyebrow">doctor sorts problems by what they cost</span>
+<pre class="code"><span class="cm">$</span> byakugan doctor -C apps/web
+byakugan doctor · apps/web · next
+42 entries · 310 project files · 1204 package files
+
+<span class="kw">blocks</span>  1 import of project code cannot be resolved
+        Every run reports "affected", because such an import
+        could hide any change.
+        <span class="fn">fix</span> Declare the alias in tsconfig "paths". byakugan does
+        not read webpack, Turbopack or Vite aliases.
+        - apps/web/src/icons.ts: cannot resolve "~icons/mdi/home"</pre>
+        <dl class="kv" style="margin-top:18px">
+          <dt><span class="tok">blocks</span></dt><dd>Every run reports "affected". Fix it first.</dd>
+          <dt><span class="tok">hides</span></dt><dd>A change can go unseen.</dd>
+          <dt><span class="tok">coarse</span></dt><dd>Extra runs, never a missed change.</dd>
+          <dt><span class="tok">note</span></dt><dd>Worth knowing.</dd>
+        </dl>
+      </div>
+
+      <div class="panel reveal scroll" style="margin-top:20px">
+        <table class="table">
+          <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>byakugan doctor</code></td><td>Checks that byakugan reads the app correctly, and names each fix</td></tr>
+            <tr><td><code>byakugan affected</code></td><td>Do the changes since a base commit reach the app?</td></tr>
+            <tr><td><code>byakugan hash</code></td><td>A fingerprint of everything the app uses, for a cache key</td></tr>
+            <tr><td><code>byakugan why</code></td><td>The import chain that makes a file, export or package used</td></tr>
+            <tr><td><code>byakugan graph</code></td><td>The files, exports and package files the app uses</td></tr>
+            <tr><td><code>byakugan compare</code></td><td>Two build outputs compared without per-build noise</td></tr>
+            <tr><td><code>byakugan guide</code></td><td>The seven-step setup guide, from the installed package</td></tr>
+          </tbody>
+        </table>
+        <p class="muted small" style="margin:14px 0 0"><code>byakugan &lt;command&gt; --help</code> prints the options, examples, exit codes and JSON shape of a command.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="recipes">
+    <div class="wrap narrow">
+      <div class="section-head reveal">
+        <h2 class="display">Recipes for your <em>pipeline.</em></h2>
+        <p class="lede">GitHub Actions steps you can paste. Each one runs after the install step, with <code>fetch-depth: 0</code> on checkout.</p>
+      </div>
+
+      <article class="panel recipe reveal">
+        <span class="eyebrow">Recipe 1</span>
+        <p class="h4">Skip the end-to-end tests of one app</p>
+        <p><code>affected</code> writes <code>affected=true|false</code> to <code>$GITHUB_OUTPUT</code>. A failed step fails the job, so an error never skips anything.</p>
+<pre class="code">- uses: actions/checkout@v7
+  with:
+    fetch-depth: 0   <span class="cm"># affected needs the merge base</span>
+- run: npm ci
+- id: web
+  env:
+    BASE_REF: ${{ github.base_ref }}
+  run: npx --no-install byakugan affected -C apps/web --base <span class="str">"origin/$BASE_REF"</span>
+- if: steps.web.outputs.affected != 'false'
+  run: npm run e2e --workspace web</pre>
+      </article>
+
+      <article class="panel recipe reveal">
+        <span class="eyebrow">Recipe 2</span>
+        <p class="h4">A monorepo: one run, one job per affected app</p>
+        <p>With <code>--workspace</code>, <code>apps=</code> is a JSON list of the affected app directories. Fan out with a matrix.</p>
+<pre class="code">jobs:
+  affected:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.byakugan.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - run: npm ci
+      - id: byakugan
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: npx --no-install byakugan affected --workspace --base <span class="str">"origin/$BASE_REF"</span>
+  build:
+    needs: affected
+    if: needs.affected.outputs.apps != '[]'
+    strategy:
+      matrix:
+        app: ${{ fromJSON(needs.affected.outputs.apps) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: npm ci
+      - env: { APP: <span class="str">"${{ matrix.app }}"</span> }
+        run: npm run build --prefix <span class="str">"$APP"</span></pre>
+      </article>
+
+      <article class="panel recipe reveal">
+        <span class="eyebrow">Recipe 3</span>
+        <p class="h4">Playwright in a monorepo</p>
+        <p>End-to-end specs drive a browser and do not import app code. Run the suite when a change reaches an app it talks to, or the test package itself. This <code>byakugan.json</code> in the test package makes an edited spec count:</p>
+<pre class="code">{ <span class="str">"framework"</span>: <span class="str">"none"</span>, <span class="str">"entry"</span>: [<span class="str">"tests/**/*.spec.ts"</span>, <span class="str">"playwright.config.ts"</span>] }</pre>
+<pre class="code">e2e:
+  needs: affected
+  if: >-
+    contains(fromJSON(needs.affected.outputs.apps), 'apps/web') ||
+    contains(fromJSON(needs.affected.outputs.apps), 'apps/api') ||
+    contains(fromJSON(needs.affected.outputs.apps), 'e2e')</pre>
+      </article>
+
+      <article class="panel recipe reveal">
+        <span class="eyebrow">Recipe 4</span>
+        <p class="h4">Reuse a Next.js build when nothing it uses changed</p>
+        <p>The fingerprint is the cache key. It hashes the installed files the app uses, so a dependency bump that touches other files keeps the key. <code>--strict</code> makes the key cover everything the build emits.</p>
+<pre class="code">- id: web
+  run: npx --no-install byakugan hash -C apps/web --strict
+- id: cache
+  uses: actions/cache@v6
+  with:
+    path: apps/web/.next
+    key: web-next-${{ steps.web.outputs.fingerprint }}
+- if: steps.cache.outputs.cache-hit != 'true'
+  run: npm run build --workspace web</pre>
+      </article>
+
+      <article class="panel recipe reveal">
+        <span class="eyebrow">Recipe 5</span>
+        <p class="h4">Only the tests and stories a change reaches</p>
+        <p><code>--each</code> gives one verdict per matching file. A barrel still splits by export: an edit to <code>Card</code> reaches the test that imports <code>Card</code>, and not the one that imports <code>Button</code> from the same file. Runner configs and <code>.storybook/preview</code> reach every file.</p>
+<pre class="code"><span class="cm"># unit and component tests</span>
+npx --no-install byakugan affected --base origin/main --each <span class="str">'src/**/*.test.{ts,tsx}'</span> > tests.txt
+[ -s tests.txt ] && xargs npx vitest run < tests.txt
+
+<span class="cm"># Storybook stories, for visual tests</span>
+npx --no-install byakugan affected -C packages/ui --base origin/main --each <span class="str">'src/**/*.stories.tsx'</span></pre>
+      </article>
+
+      <article class="panel recipe reveal">
+        <span class="eyebrow">Recipe 6</span>
+        <p class="h4">Turborepo and Nx</p>
+        <p>Both decide per package or per project. Let byakugan choose the apps, and let the task runner run and cache the tasks.</p>
+<pre class="code">apps=$(npx --no-install byakugan affected --workspace --base origin/main --json \
+  | jq -r <span class="str">'.affected[] | "--filter=./" + .'</span>)
+[ -n <span class="str">"$apps"</span> ] && npx turbo run build e2e $apps</pre>
+      </article>
+
+      <article class="panel recipe reveal">
+        <span class="eyebrow">Recipe 7</span>
+        <p class="h4">Check byakugan against real builds first</p>
+        <p>Before you skip anything, run in shadow mode. Build every pull request, and when byakugan says unaffected, build the merge base too and compare. A failing <code>compare</code> names the files that differ.</p>
+<pre class="code">- id: web
+  run: npx --no-install byakugan affected -C apps/web --strict --base <span class="str">"origin/$BASE_REF"</span>
+- run: npm run build --workspace web
+- if: steps.web.outputs.affected == 'false'
+  run: |
+    git worktree add ../base <span class="str">"$(git merge-base "origin/$BASE_REF" HEAD)"</span>
+    (cd ../base && npm ci && npm run build --workspace web)
+    npx --no-install byakugan compare ../base/apps/web/.next apps/web/.next</pre>
+      </article>
+
+      <p class="center reveal" style="margin-top:28px"><a class="link" href="https://github.com/IShotTheSheriff/byakugan/blob/main/docs/ci.md">More recipes, with exact comparison against main</a></p>
+    </div>
+  </section>
+
+  <section class="section" id="agents">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 class="display">Built for agents to <em>operate.</em></h2>
+        <p class="lede">The agent that opens the pull requests can also set up and read the gate.</p>
+      </div>
+      <div class="grid grid-3">
+        <div class="card sky reveal" style="--i:0"><div class="card-face drift" style="--drift:9s"><span class="tok">byakugan guide</span></div>
+          <div class="card-body"><h3 class="title">A guide in the <em>package</em></h3><p>Seven steps from install to a CI gate, printed from <code>node_modules</code>. No network needed.</p></div></div>
+        <div class="card rose reveal" style="--i:1"><div class="card-face drift" style="--drift:11s;--drift-delay:1.2s"><span class="tok hot">--json</span></div>
+          <div class="card-body"><h3 class="title">Output to <em>parse</em></h3><p>One JSON document on stdout. Warnings go to stderr. Three exit codes, the same for every command.</p></div></div>
+        <div class="card sage reveal" style="--i:2"><div class="card-face drift" style="--drift:12s;--drift-delay:.8s"><span class="tok">hint:</span></div>
+          <div class="card-body"><h3 class="title">Errors that name the <em>fix</em></h3><p>Each error carries a hint and the help command to run. A typo gets "did you mean".</p></div></div>
+      </div>
+      <div class="narrow panel reveal" style="margin-top:28px">
+        <span class="eyebrow">What an agent reads</span>
+<pre class="code"><span class="cm">$</span> byakugan doctor --workspace --json | jq <span class="str">'.apps[] | {app, findings: [.findings[] | {severity, kind, fix}]}'</span>
+{
+  <span class="str">"app"</span>: <span class="str">"apps/web"</span>,
+  <span class="str">"findings"</span>: [{
+    <span class="str">"severity"</span>: <span class="str">"hides"</span>,
+    <span class="str">"kind"</span>: <span class="str">"build-output"</span>,
+    <span class="str">"fix"</span>: <span class="str">"Add a \"source\" condition to the package's \"exports\" ..."</span>
+  }]
+}
+
+<span class="cm">$</span> byakugan affcted
+byakugan: <span class="kw">error:</span> Unknown command "affcted"
+  <span class="fn">hint:</span> Did you mean "affected"?
+  <span class="fn">help:</span> byakugan --help</pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="limits">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 class="display">Where it can be <em>wrong.</em></h2>
+        <p class="lede">A wrong "affected" costs one extra run. A wrong "unaffected" ships something untested. byakugan picks the first kind where it can.</p>
+      </div>
+      <div class="grid grid-2">
+        <div class="tile sky reveal" style="--i:0">
+          <h3 class="title">Costs extra <em>runs</em></h3>
+          <ul class="muted small">
+            <li>CommonJS files are hashed whole.</li>
+            <li>There is no type checker. A declaration reached through <code>import type</code> counts whole.</li>
+            <li>Git mode sees dependency updates per package. A saved manifest sees them per file.</li>
+            <li>An import byakugan cannot resolve counts as affected on every run.</li>
+          </ul>
+        </div>
+        <div class="tile rose reveal" style="--i:1">
+          <h3 class="title">Can miss a <em>change</em></h3>
+          <ul class="muted small">
+            <li>Data fetched at build time: a CMS, a database.</li>
+            <li>File paths and imports built from variables. <code>doctor</code> warns about them.</li>
+            <li>Environment variables that config files read, unless <code>"env"</code> names them.</li>
+            <li>Aliases that exist only in bundler config. Put them in tsconfig <code>paths</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="center muted reveal" style="margin-top:24px;max-width:640px;margin-left:auto;margin-right:auto">byakugan has no sandbox. Trust comes from checking it against real builds with <code>byakugan compare</code>. <a class="link" href="https://github.com/IShotTheSheriff/byakugan/blob/main/docs/limits.md">Read the full list of limits</a></p>
+    </div>
+  </section>
+
+  <section class="section" id="faq">
+    <div class="wrap narrow">
+      <div class="section-head reveal"><h2 class="display">Frequently asked <em>questions</em></h2></div>
+      <div class="faq reveal">
+        <details><summary>How is this different from Turborepo or Nx affected?</summary><div>They work per package or per project: a change in a package affects everything that depends on it. byakugan works per export and per file inside npm packages. It does not run or cache tasks, so the two fit together. byakugan picks the apps, the task runner runs them.</div></details>
+        <details><summary>How does it relate to Knip?</summary><div>It is Knip's approach turned around. Knip walks from entry files through every import and reports what nothing uses. byakugan does the same walk and keeps the rest, the code the app uses, so it can hash it. Both run on the oxc parser and resolver.</div></details>
+        <details><summary>Does it work with webpack and Turbopack?</summary><div>byakugan does not run the bundler. It resolves imports through tsconfig <code>paths</code> and package <code>exports</code>, as both bundlers do. Build comparison was checked against Turbopack builds on Next.js 16. Webpack builds are untested, so run shadow mode before you reuse webpack output.</div></details>
+        <details><summary>What about dependency updates?</summary><div>The fingerprint hashes the installed files the app uses, so a lodash release that only changes <code>filter.js</code> keeps the key when the app uses <code>partition</code>. With <code>--base</code>, byakugan reads the lockfile and counts a bump per package. With <code>--base-manifest</code>, it compares per file.</div></details>
+        <details><summary>Which frameworks does it know?</summary><div>Next.js gets the most attention: App Router, Pages Router, Tailwind, shadcn, server actions. Vite, React Router, Hono and plain TypeScript packages work too. Any package can name its entries in <code>byakugan.json</code>.</div></details>
+        <details><summary>Is it safe to run on pull requests from forks?</summary><div>byakugan reads nothing outside the repository and needs only <code>contents: read</code>. It does run the project's Tailwind, which loads config files from the repository, so run it where you would run the build.</div></details>
+        <details><summary>What does it cost?</summary><div>Nothing. byakugan is MIT licensed and runs in your own CI. It sends no data anywhere.</div></details>
+      </div>
+      <div class="center reveal" style="margin-top:56px">
+        <div class="actions" style="justify-content:center">
+          <a class="key key-lg" href="https://github.com/IShotTheSheriff/byakugan/blob/main/docs/adopting.md">Read the setup guide <svg class="arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
+          <a class="link" href="https://www.npmjs.com/package/byakugan-cli">byakugan-cli on npm</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer"><div class="wrap"><span>byakugan · MIT · <a href="https://github.com/IShotTheSheriff/byakugan">GitHub</a> · <a href="https://www.npmjs.com/package/byakugan-cli">npm</a></span><span>Not affiliated with Naruto or its publishers</span></div></footer>
+</body>
+</html>
