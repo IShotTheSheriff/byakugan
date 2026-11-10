@@ -1234,3 +1234,37 @@ describe('JSON files with a UTF-8 byte order mark', () => {
     assert.equal(result.affected, false, explain(dir, result));
   });
 });
+
+describe('a type-only import of a package that ships as @types alone', () => {
+  const types = (installed = true) =>
+    app({
+      'package.json': { name: 'web', type: 'module', devDependencies: { '@types/mdast': '^4.0.4' } },
+      'byakugan.json': { entry: ['src/main.ts'] },
+      'src/main.ts': "import type { Paragraph } from 'mdast';\nexport const text = (p: Paragraph) => p.type;\n",
+      ...(installed ? pkg('@types/mdast', { version: '4.0.4', types: 'index.d.ts' }, { 'index.d.ts': 'export interface Paragraph { type: string }\n' }) : {}),
+    });
+  const warned = (dir: string) => analyze({ cwd: dir }).warnings.filter(w => w.includes('cannot resolve'));
+
+  test('resolves to the @types package, with no warning', () => {
+    const dir = types();
+    assert.deepEqual(warned(dir), []);
+    assert.ok(liveKeys(dir).includes('npm:@types/mdast#<types>'), liveKeys(dir).join('\n'));
+  });
+
+  test('a bump of the @types package counts', () => {
+    const dir = types();
+    const before = fingerprintOf(dir);
+    edit(dir, 'node_modules/@types/mdast/package.json', s => s.replace('4.0.4', '4.0.5'));
+    assert.notEqual(fingerprintOf(dir), before);
+  });
+
+  test('still warns when the @types package is not installed', () => {
+    assert.equal(warned(types(false)).length, 1);
+  });
+
+  test('a value import of the same name still fails closed', () => {
+    const dir = types();
+    write(dir, 'src/main.ts', "import { visit } from 'mdast';\nexport const v = visit;\n");
+    assert.equal(warned(dir).length, 1);
+  });
+});

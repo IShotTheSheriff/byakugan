@@ -151,6 +151,14 @@ describe('git mode: files git ignores', () => {
     assert.match(result.reasons[0].detail, /ignored by git/);
   });
 
+  test('an ignored .DS_Store next to the inputs is not an input', () => {
+    const dir = commit(web({ '.gitignore': '.DS_Store\n', 'byakugan.json': { entry: ['src/main.ts'], inputs: ['config/**'] }, 'config/flags.json': '{}\n' }));
+    const before = analyze({ cwd: dir }).fingerprint();
+    write(dir, 'config/.DS_Store', 'Bud1');
+    assert.equal(since(dir).affected, false);
+    assert.equal(analyze({ cwd: dir }).fingerprint(), before);
+  });
+
   test('an ignored .env file is a warning, not a reason', () => {
     const dir = commit(web({ '.gitignore': '.env*\n' }));
     write(dir, '.env.local', 'SECRET=1\n');

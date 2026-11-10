@@ -351,6 +351,9 @@ export const staticPrefix = (pattern: string) => {
 };
 
 /** Files under `cwd` matching `patterns` (`!` excludes), as absolute paths. */
+/** Files the operating system drops into any directory it shows. No build reads them, and CI has none. */
+export const OS_FILES = ['**/.DS_Store', '**/Thumbs.db', '**/desktop.ini'];
+
 export const safeGlob = (patterns: string[], options: GlobOptions): string[] => {
   const { cwd } = options;
   const dot = options.dot ?? false;

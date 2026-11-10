@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { readRegular, readText, stripBlocks } from './fs.ts';
-import { globMatcher, safeGlob } from './glob.ts';
+import { globMatcher, OS_FILES, safeGlob } from './glob.ts';
 import { parseJsonc } from './jsonc.ts';
 import {
   GLOB_SEPARATOR,
@@ -282,7 +282,7 @@ export const loadModule = (file: string, content: Buffer | string, options?: Par
 export const valueRequests = (module: ModuleInfo, modularize: Record<string, unknown>): ModuleRequest[] =>
   module.kind === 'esm' ? module.requests.filter(r => !r.type && !(r.named && modularize[r.source])) : [];
 
-const FILES_IGNORE = ['**/node_modules/**', '**/.git/**', '**/.next/**', '**/.turbo/**', '**/.vercel/**'];
+const FILES_IGNORE = ['**/node_modules/**', '**/.git/**', '**/.next/**', '**/.turbo/**', '**/.vercel/**', ...OS_FILES];
 
 const filesUnder = (dir: string, boundary: string): string[] => {
   try {
@@ -948,9 +948,22 @@ export class UsageGraph {
     const pkg = this.resolver.packageOf(file);
     if (!pkg) return;
     this.markKey(`npm:${pkg.name}#<types>`, pkg.dir, hashOf(pkg.version), via);
-    const typesName = `@types/${pkg.name.startsWith('@') ? pkg.name.slice(1).replace('/', '__') : pkg.name}`;
+    this.markTypesPackage(pkg.name, via);
+  }
+
+  /** `@types/mdast` for `mdast`, `@types/babel__core` for `@babel/core`. False when it is not installed. */
+  private markTypesPackage(name: string, via: string): boolean {
+    const typesName = `@types/${name.startsWith('@') ? name.slice(1).replace('/', '__') : name}`;
     const types = this.installedPackage(typesName);
     if (types) this.markKey(`npm:${typesName}#<types>`, types.dir, hashOf(types.version), via);
+    return types !== undefined;
+  }
+
+  /** `import type { Paragraph } from 'mdast'`: no package `mdast` exists, and the types come from `@types/mdast`. */
+  private useTypesOnlyPackage(specifier: string, from: string, via: string): boolean {
+    if (isInNodeModules(from) || !/^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*(\/.*)?$/i.test(specifier)) return false;
+    if (this.project.pathTargets(specifier).length > 0 || this.resolver.resolve(specifier, from).length > 0) return false;
+    return this.markTypesPackage(packageNameOf(specifier), via);
   }
 
   private resolveOrRecord(specifier: string, from: string, type = false): string[] {
@@ -1030,6 +1043,7 @@ export class UsageGraph {
     let targets = modular ? this.resolver.resolve(modular, from) : [];
     let name = 'default';
     if (targets.length === 0) {
+      if (type && this.useTypesOnlyPackage(specifier, from, via)) return;
       targets = this.resolveOrRecord(specifier, from, type);
       name = imported;
     }
