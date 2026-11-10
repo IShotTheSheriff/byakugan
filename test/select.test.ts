@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, renameSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { affectedSinceCommit, affectedSinceManifest, createManifest } from '../src/affected.ts';
 import { UsageGraph } from '../src/graph.ts';
 import { loadProject } from '../src/project.ts';
-import { eachProject, entriesReaching } from '../src/select.ts';
+import { eachFingerprints, eachProject, eachSinceManifest, entriesReaching } from '../src/select.ts';
 import { app, pkg, write } from './helpers.ts';
 
 const lock = (version: string) =>
@@ -128,5 +128,129 @@ describe('affected --each', () => {
     const { selection, graph } = build('b');
     const result = affectedSinceManifest(graph, manifest);
     assert.deepEqual(entriesReaching(graph, result.reasons, selection.each, patterns), { all: false, files: ['src/one.test.ts', 'src/two.test.ts'] });
+  });
+});
+
+describe('affected --each against a manifest', () => {
+  const patterns = ['src/**/*.test.ts'];
+  const build = (dir: string, config?: { mode: 'strict' }) => {
+    const selection = eachProject(loadProject({ cwd: dir, config }), patterns);
+    return { graph: new UsageGraph(selection.project).build(), each: selection.each };
+  };
+  /** Saves a manifest, applies `edits` (null deletes) and returns the test files whose fingerprint moved. */
+  const select = (edits: Record<string, string | null>) => {
+    const dir = app(files, { repo: true });
+    const before = build(dir);
+    const base = createManifest(before.graph, eachFingerprints(before.graph, before.each));
+    for (const [path, content] of Object.entries(edits)) {
+      if (content === null) rmSync(join(dir, path));
+      else write(dir, path, content);
+    }
+    const after = build(dir);
+    return eachSinceManifest(after.graph, after.each, base);
+  };
+  const tests = ['src/add.test.ts', 'src/button.test.ts', 'src/card.test.ts', 'src/sub.test.ts'];
+
+  test('no change reaches no test', () => {
+    assert.deepEqual(select({}), { all: false, files: [] });
+  });
+
+  test('a change to add reaches the test that imports add', () => {
+    assert.deepEqual(select({ 'src/math.ts': files['src/math.ts'].replace('a + b', 'a + b + 0') }), { all: false, files: ['src/add.test.ts'] });
+  });
+
+  test('a change to an export no test uses reaches none', () => {
+    assert.deepEqual(select({ 'src/math.ts': files['src/math.ts'].replace('=> 0', '=> 1') }), { all: false, files: [] });
+  });
+
+  test('a barrel splits by export', () => {
+    assert.deepEqual(select({ 'src/ui/Card.ts': "export const Card = () => 'card!';\n" }), { all: false, files: ['src/card.test.ts'] });
+  });
+
+  test('a test that drops an import is the only one reached, though the fragments it used are gone from the graph', () => {
+    const edits = { 'src/sub.test.ts': "import { sub } from './math';\nconsole.log(sub(1, 2));\n" };
+    assert.deepEqual(select(edits), { all: false, files: ['src/sub.test.ts'] });
+  });
+
+  test('an export deleted from under a test reaches that test', () => {
+    const edits = { 'src/math.ts': files['src/math.ts'].replace(/export const sub.*\n/, '') };
+    assert.deepEqual(select(edits), { all: false, files: ['src/sub.test.ts'] });
+  });
+
+  test('an edit inside an installed package reaches the test that uses it', () => {
+    const edits = { 'node_modules/left-pad/index.js': 'module.exports = (s, n) => s.padStart(n, "0");\n' };
+    assert.deepEqual(select(edits), { all: false, files: ['src/sub.test.ts'] });
+  });
+
+  test('the test runner config reaches every test', () => {
+    assert.deepEqual(select({ 'vitest.config.ts': "export default { test: { environment: 'jsdom' } };\n" }).files, tests);
+  });
+
+  test('a new test is reached, a deleted one is not listed', () => {
+    const added = select({ 'src/new.test.ts': "import { add } from './math';\nconsole.log(add(2, 2));\n" });
+    assert.deepEqual(added, { all: false, files: ['src/new.test.ts'] });
+    assert.deepEqual(select({ 'src/card.test.ts': null }), { all: false, files: [] });
+  });
+
+  test('an import that does not resolve reaches every test', () => {
+    const result = select({ 'src/add.test.ts': "import { add } from './math';\nimport './gone';\nconsole.log(add(1, 2));\n" });
+    assert.equal(result.all, true);
+    assert.deepEqual(result.files, tests);
+  });
+
+  test('a manifest from another mode reaches every test', () => {
+    const dir = app(files, { repo: true });
+    const before = build(dir);
+    const base = createManifest(before.graph, eachFingerprints(before.graph, before.each));
+    const after = build(dir, { mode: 'strict' });
+    assert.equal(eachSinceManifest(after.graph, after.each, base).all, true);
+  });
+
+  test('a manifest without per-file fingerprints reaches every test', () => {
+    const dir = app(files, { repo: true });
+    const { graph, each } = build(dir);
+    assert.equal(eachSinceManifest(graph, each, createManifest(graph)).all, true);
+  });
+
+  test('a file fingerprint depends only on what that file reaches', () => {
+    const dir = app(files, { repo: true });
+    const before = build(dir);
+    const first = eachFingerprints(before.graph, before.each);
+    write(dir, 'src/ui/Button.ts', "export const Button = () => 'button!';\n");
+    const after = build(dir);
+    const second = eachFingerprints(after.graph, after.each);
+    assert.deepEqual(Object.keys(first), tests);
+    assert.notEqual(second['src/button.test.ts'], first['src/button.test.ts']);
+    for (const other of tests.filter(t => t !== 'src/button.test.ts')) assert.equal(second[other], first[other], other);
+  });
+});
+
+describe('a manifest that cannot be compared', () => {
+  const graphOf = (config?: { mode: 'strict' }) => new UsageGraph(loadProject({ cwd: app(files, { repo: true }), config })).build();
+
+  test('another byakugan version is affected, with one reason that says why', () => {
+    const graph = graphOf();
+    const result = affectedSinceManifest(graph, { ...createManifest(graph), byakugan: '0.0.1' });
+    assert.equal(result.affected, true);
+    assert.equal(result.reasons.length, 1);
+    assert.match(result.reasons[0].detail, /written by byakugan 0\.0\.1 and this is \d/);
+  });
+
+  test('a manifest in the old format is affected', () => {
+    const graph = graphOf();
+    const { fingerprint, fragments } = createManifest(graph);
+    const result = affectedSinceManifest(graph, { version: 1, fingerprint, fragments });
+    assert.match(result.reasons[0].detail, /has format 1 and this byakugan writes format 2/);
+  });
+
+  test('another mode is affected', () => {
+    const base = createManifest(graphOf());
+    const result = affectedSinceManifest(graphOf({ mode: 'strict' }), base);
+    assert.match(result.reasons[0].detail, /written in behavior mode and this run is in strict mode/);
+  });
+
+  test('the same version and mode compare as before', () => {
+    const graph = graphOf();
+    assert.equal(affectedSinceManifest(graph, createManifest(graph)).affected, false);
   });
 });

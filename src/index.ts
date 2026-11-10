@@ -2,15 +2,15 @@ import { affectedSinceCommit, affectedSinceManifest, createManifest, type Affect
 import { UsageGraph } from './graph.ts';
 import { loadProject, type LoadProjectOptions } from './project.ts';
 
-export { affectedSinceCommit, affectedSinceManifest, createManifest, readManifest, MANIFEST_VERSION } from './affected.ts';
+export { affectedSinceCommit, affectedSinceManifest, createManifest, manifestMismatch, readManifest, MANIFEST_VERSION } from './affected.ts';
 export type { AffectedReason, AffectedResult, IgnoredChange, Manifest } from './affected.ts';
 export { UsageGraph, moduleFragments, loadModule, fragmentKey, nodeId, parseNodeId } from './graph.ts';
-export type { FileRecord, LiveFragment, NodeKind, Unresolved } from './graph.ts';
+export type { FileRecord, LiveFragment, ModuleCache, NodeKind, Unresolved } from './graph.ts';
 export { parseModule } from './parse.ts';
 export type { Decl, EsmModule, ExportEntry, ImportBinding, ModuleInfo, OpaqueModule, Usage } from './parse.ts';
 export { loadProject } from './project.ts';
 export { workspaceApps, workspacePatterns } from './workspace.ts';
-export { eachProject, entriesReaching } from './select.ts';
+export { eachFingerprints, eachProject, eachSinceManifest, entriesReaching } from './select.ts';
 export { compareBuilds } from './compare.ts';
 export type { BuildDifference } from './compare.ts';
 export type { EachProject, EachResult } from './select.ts';

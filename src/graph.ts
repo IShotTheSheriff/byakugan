@@ -336,6 +336,13 @@ const components = (start: string, next: (node: string) => string[], done: (node
   return out;
 };
 
+/**
+ * Parsed modules shared by the graphs of one run. The apps of a workspace reach the same packages,
+ * and parsing is most of a run. An entry holds the module and the warning its file gave. Valid
+ * only while no file changes, so make a new one per run.
+ */
+export type ModuleCache = Map<string, { module: ModuleInfo; warning?: string }>;
+
 export const fragmentKey = (fileKey: string, fragment: string) => (fragment === '' ? fileKey : `${fileKey}#${fragment}`);
 
 export class UsageGraph {
@@ -391,9 +398,15 @@ export class UsageGraph {
   private seenWarnings = new Set<string>();
   private nodeByFile?: Map<string, string>;
 
-  constructor(project: Project, resolver?: Resolver) {
+  private cache?: ModuleCache;
+  private cachePrefix: string;
+
+  constructor(project: Project, resolver?: Resolver, cache?: ModuleCache) {
     this.project = project;
     this.parseOptions = project.parseOptions;
+    this.cache = cache;
+    // The same file parses differently under another app's JSX or `verbatimModuleSyntax` settings.
+    this.cachePrefix = JSON.stringify(project.parseOptions) + SEP;
     this.resolver =
       resolver ??
       new Resolver({
@@ -412,6 +425,7 @@ export class UsageGraph {
     for (const name of this.project.packages) this.markPackageVersion(name);
     for (const entry of this.project.entries) this.enqueue(nodeId('S', entry, '*'), null);
     this.drain();
+    this.useClientReferences();
     this.useTailwind();
     this.drain();
     this.useWorkspaceManifests();
@@ -425,6 +439,41 @@ export class UsageGraph {
       );
     }
     return this;
+  }
+
+  /**
+   * Strict mode only. Next.js ships a `'use client'` module whole when a server module imports it:
+   * the client loads the module by id and picks the export by name, so the bundler keeps every
+   * export. An unused export next to a used one then changes the client chunk, though nothing
+   * runs it, which is why behavior mode leaves it out. Between two client modules the bundler
+   * tree-shakes as usual, so only imports from the server side count here. Server modules are the
+   * entries and what they import, up to the first `'use client'` file.
+   */
+  private useClientReferences() {
+    if (this.project.framework !== 'next' || this.project.config.mode !== 'strict') return;
+    const isClient = (file: string) => {
+      const module = this.modules.get(file);
+      return module?.kind === 'esm' && module.directives.includes('use client');
+    };
+    // Marking a module whole can reach new server modules, so repeat until a pass adds nothing.
+    for (let before = -1; before !== this.queue.length; ) {
+      before = this.queue.length;
+      const server = new Set(this.project.entries.filter(f => !isClient(f)));
+      const walk = [...server];
+      while (walk.length > 0) {
+        const from = walk.pop() as string;
+        for (const to of this.edges.get(from)?.keys() ?? []) {
+          if (isClient(to)) {
+            const run = nodeId('M', from);
+            this.enqueue(nodeId('S', to, '*'), this.parents.has(run) ? run : nodeId('S', from, '*'));
+          } else if (!server.has(to)) {
+            server.add(to);
+            walk.push(to);
+          }
+        }
+      }
+      this.drain();
+    }
   }
 
   /** Name globs of the environment variables whose values count: the ones the framework inlines, plus `env`. */
@@ -746,9 +795,13 @@ export class UsageGraph {
     if (cached) return cached;
     let module: ModuleInfo;
     const outside = !this.inside(file);
-    const read = outside ? undefined : readRegular(file, JS_EXTENSIONS.has(extname(file)) || STYLE_EXTENSIONS.has(extname(file)) || COMPONENT_EXTENSIONS.has(extname(file)));
+    const shared = outside ? undefined : this.cache?.get(this.cachePrefix + file);
+    const read = outside || shared ? undefined : readRegular(file, JS_EXTENSIONS.has(extname(file)) || STYLE_EXTENSIONS.has(extname(file)) || COMPONENT_EXTENSIONS.has(extname(file)));
     if (outside) {
       module = { kind: 'opaque', reason: 'asset', content: '', specifiers: [], jsx: false };
+    } else if (shared) {
+      module = shared.module;
+      if (shared.warning) this.warn(`${this.fileKey(file)}: ${shared.warning}`);
     } else if (read === undefined) {
       // A link to a directory the crawl lists already: hashed by its target, like an input.
       const link = linkedDirectory(file);
@@ -757,17 +810,18 @@ export class UsageGraph {
     } else if ('hash' in read) {
       module = { kind: 'opaque', reason: 'asset', content: '', hash: read.hash, specifiers: [], jsx: false };
     } else {
+      let warning: string | undefined;
       try {
         const outcome = loadModule(file, read.content, this.parseOptions);
         module = outcome.module;
-        if (outcome.errors.length > 0 && !isInNodeModules(file)) {
-          this.warn(`${this.fileKey(file)}: parse error, hashing the whole file (${outcome.errors[0]})`);
-        }
+        if (outcome.errors.length > 0 && !isInNodeModules(file)) warning = `parse error, hashing the whole file (${outcome.errors[0]})`;
       } catch (error) {
         // Never hash an empty string for a file that has content: edits to it would go unseen.
         module = { kind: 'opaque', reason: 'parse-error', content: read.content, specifiers: [], jsx: false };
-        this.warn(`${this.fileKey(file)}: cannot analyze, hashing the whole file (${(error as Error).message})`);
+        warning = `cannot analyze, hashing the whole file (${(error as Error).message})`;
       }
+      if (warning) this.warn(`${this.fileKey(file)}: ${warning}`);
+      this.cache?.set(this.cachePrefix + file, { module, warning });
     }
     this.modules.set(file, module);
     if (!isInNodeModules(file)) this.checkBuildOutput(file);

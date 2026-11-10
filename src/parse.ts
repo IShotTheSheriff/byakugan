@@ -783,6 +783,8 @@ const BORROWING = new Set(['prototype', 'call', 'apply', 'bind']);
 const FUNCTIONS = new Set(['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration', 'TSDeclareFunction']);
 const CLASSES = new Set(['ClassExpression', 'ClassDeclaration']);
 const VALUE_WRAPPERS = new Set([...WRAPPERS, 'TSInstantiationExpression']);
+/** TypeScript syntax that compiles to code: an enum's initializers and a namespace's body run when the module does. */
+const TS_RUNTIME = new Set(['TSEnumDeclaration', 'TSEnumBody', 'TSEnumMember', 'TSModuleDeclaration', 'TSModuleBlock']);
 
 /** What a top-level piece of code does while the module evaluates, outside function bodies. */
 interface Eager {
@@ -818,7 +820,7 @@ const eagerOf = (root: unknown, isPure: (call: N) => Purity, mayCall: (name: str
       continue;
     }
     if (!isNode(value) || FUNCTIONS.has(value.type)) continue;
-    if (value.type.startsWith('TS') && !VALUE_WRAPPERS.has(value.type) && value.type !== 'TSEnumDeclaration' && value.type !== 'TSEnumMember') continue;
+    if (value.type.startsWith('TS') && !VALUE_WRAPPERS.has(value.type) && !TS_RUNTIME.has(value.type)) continue;
     if (CLASSES.has(value.type)) {
       // A class body runs on definition only in its heritage, decorators, computed keys and static members.
       stack.push(value.superClass, value.decorators);
@@ -889,7 +891,11 @@ const analyze = (
 ): ParseOutcome => {
   const program = result.program as unknown as N;
   const errors: string[] = [];
-  if (!result.module.hasModuleSyntax) {
+  // `import fs = require('fs')` and `export = x` are module syntax to TypeScript, though not to the parser.
+  const tsModule = nodes(program.body).some(
+    s => s.type === 'TSExportAssignment' || (s.type === 'TSImportEqualsDeclaration' && node(s.moduleReference)?.type === 'TSExternalModuleReference')
+  );
+  if (!result.module.hasModuleSyntax && !tsModule) {
     const usage = newUsage();
     walk(program, usage);
     return {
@@ -1019,6 +1025,8 @@ const analyze = (
         const id = node(decl.id);
         if (id?.type === 'Identifier' && decl.kind !== 'global' && id.name !== 'global') {
           declare([id.name as string], slice(stmt), decl.body);
+          // A namespace compiles to a function called on the spot, so its statements run with the module.
+          if (!decl.declare && decl.body) eager.push({ names: [id.name as string], node: decl.body, pos: stmt.start });
           if (exported) exportLocal(id.name as string, false);
         } else {
           typeEffects.push(slice(stmt));

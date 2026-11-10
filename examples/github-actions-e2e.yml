@@ -1,0 +1,70 @@
+# Run the end-to-end tests of apps/web only when a change can alter how it behaves.
+#
+# Pushes to main save a manifest under the commit's SHA. A pull request restores
+# the manifest of its merge base and compares with it: two real graphs, exact
+# down to single files inside node_modules. When no manifest exists for that
+# commit yet, the job falls back to git mode.
+name: web e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the merge base, and git mode as the fallback
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      # byakugan-cli is a dev dependency. --no-install fails instead of fetching the
+      # unrelated `byakugan` package from npm.
+      - run: npm ci
+
+      # On main: save what web uses at this commit. Caches saved on the default
+      # branch are readable from pull requests.
+      - if: github.event_name == 'push'
+        run: npx --no-install byakugan hash -C apps/web --manifest .byakugan/web.json
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@v6
+        with:
+          path: .byakugan/web.json
+          key: byakugan-web-${{ github.sha }}
+
+      # On a pull request: the manifest of the commit this branch is compared with.
+      - id: base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }} # through env, so a branch name cannot inject shell code
+        run: echo "sha=$(git merge-base "origin/$BASE_REF" HEAD)" >> "$GITHUB_OUTPUT"
+      - id: manifest
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v6
+        with:
+          path: .byakugan/web.json
+          key: byakugan-web-${{ steps.base.outputs.sha }}
+
+      - id: changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          HAVE_MANIFEST: ${{ steps.manifest.outputs.cache-hit }}
+        run: |
+          if [ "$HAVE_MANIFEST" = "true" ]; then
+            npx --no-install byakugan affected -C apps/web --base-manifest .byakugan/web.json
+          else
+            npx --no-install byakugan affected -C apps/web --base "$BASE_SHA"
+          fi
+
+      - if: github.event_name == 'push' || steps.changes.outputs.affected == 'true'
+        run: npm run build --workspace web && npm run e2e --workspace web

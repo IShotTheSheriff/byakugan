@@ -931,11 +931,17 @@ describe('arguments and manifests from outside are checked', () => {
     const dir = app({ ...project, 'src/index.ts': 'export const a = 1;\n' });
     const graph = analyze({ cwd: dir });
     const fragments = { ...createManifest(graph).fragments };
-    const text = JSON.stringify({ version: 1, fingerprint: '', fragments }).replace('"fragments":{', '"fragments":{"__proto__":"x",');
+    const text = JSON.stringify({ ...createManifest(graph), fragments }).replace('"fragments":{', '"fragments":{"__proto__":"x",');
     const result = affectedSinceManifest(graph, readManifest(manifestFile(text)));
     assert.equal(({} as Record<string, unknown>).x, undefined);
     assert.equal(Object.getPrototypeOf(readManifest(manifestFile(text)).fragments), Object.prototype);
     assert.deepEqual(result.reasons.map(r => `${r.key}: ${r.detail}`), ['__proto__: no longer used']);
+  });
+
+  test('a manifest whose per-file fingerprints or version are not strings is rejected', () => {
+    for (const extra of ['"each":{"a.test.ts":{"x":1}}', '"each":["a"]', '"byakugan":{"x":1}', '"mode":1']) {
+      assert.throws(() => readManifest(manifestFile(`{"version":2,"fingerprint":"","fragments":{},${extra}}`)), /is not a byakugan manifest/, extra);
+    }
   });
 
   test('a manifest the tool wrote reads back as unaffected', () => {

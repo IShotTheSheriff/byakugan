@@ -128,6 +128,76 @@ describe('Next.js conventions without imports', () => {
   });
 });
 
+describe("'use client' modules", () => {
+  const client = (unused: string) => `'use client';\nexport const Used = () => <b>used</b>;\nexport const Unused = () => <i>${unused}</i>;\n`;
+  const project = (page: string, extra: Record<string, string> = {}) => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'byakugan-client-')));
+    const files: Record<string, string> = {
+      'package.json': JSON.stringify({ name: 'shop', dependencies: { next: '16.0.0', react: '19.0.0' } }),
+      'node_modules/next/package.json': '{ "name": "next", "version": "16.0.0" }',
+      'node_modules/react/package.json': '{ "name": "react", "version": "19.0.0" }',
+      'node_modules/react/jsx-runtime.js': 'exports.jsx = function () {};\n',
+      'app/page.tsx': page,
+      'ui/widget.tsx': client('one'),
+      ...extra,
+    };
+    for (const [path, content] of Object.entries(files)) write(dir, path, content);
+    return dir;
+  };
+  const moves = (dir: string) => {
+    const before = fingerprint(dir);
+    write(dir, 'ui/widget.tsx', client('two'));
+    return fingerprint(dir) !== before;
+  };
+  const serverPage = "import { Used } from '../ui/widget';\nexport default function Page() { return <Used />; }\n";
+  const strict = { 'byakugan.json': JSON.stringify({ mode: 'strict' }) };
+
+  test('strict: an unused export counts when a server component imports the module, since Next.js ships it whole', () => {
+    assert.equal(moves(project(serverPage, strict)), true);
+  });
+
+  test('behavior, the default: it does not count, since nothing runs it', () => {
+    assert.equal(moves(project(serverPage)), false);
+  });
+
+  test('behavior: the export the server component renders still counts', () => {
+    const dir = project(serverPage);
+    const before = fingerprint(dir);
+    write(dir, 'ui/widget.tsx', client('one').replace('used', 'changed'));
+    assert.notEqual(fingerprint(dir), before);
+  });
+
+  test('the mode can come from the caller, over byakugan.json', () => {
+    const dir = project(serverPage);
+    const before = analyze({ cwd: dir, config: { mode: 'strict' } }).fingerprint();
+    write(dir, 'ui/widget.tsx', client('two'));
+    assert.notEqual(analyze({ cwd: dir, config: { mode: 'strict' } }).fingerprint(), before);
+  });
+
+  test('an unknown mode is rejected', () => {
+    assert.throws(() => analyze({ cwd: project(serverPage, { 'byakugan.json': JSON.stringify({ mode: 'bytes' }) }) }), /"mode" must be one of behavior, strict/);
+  });
+
+  test('strict: it counts through a barrel and a server-side helper too', () => {
+    const page = "import { Panel } from '../ui/panel';\nexport default function Page() { return <Panel />; }\n";
+    const extra = {
+      'ui/panel.tsx': "import { Used } from './index';\nexport const Panel = () => <Used />;\n",
+      'ui/index.ts': "export * from './widget';\n",
+      ...strict,
+    };
+    assert.equal(moves(project(page, extra)), true);
+  });
+
+  test('strict: it does not count when only client modules import the module', () => {
+    assert.equal(moves(project(`'use client';\n${serverPage}`, strict)), false);
+  });
+
+  test('strict: it does not count outside Next.js', () => {
+    const dir = project(serverPage, { 'byakugan.json': JSON.stringify({ mode: 'strict', framework: 'none', entry: ['app/page.tsx'] }) });
+    assert.equal(moves(dir), false);
+  });
+});
+
 describe('git mode for files reached by pattern', () => {
   const repo = () => {
     const dir = nextApp();

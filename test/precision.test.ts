@@ -82,6 +82,32 @@ describe('git mode: exports that went away', () => {
     assert.deepEqual(keys, ['src/lib.ts#Props']);
   });
 
+  describe('a file imported only as a type', () => {
+    const files = {
+      'src/main.ts': "import type { Props } from './lib';\nexport const p: Props = { a: 1 };\n",
+      'src/lib.ts': 'export interface Props { a: number }\n',
+      'src/spare.ts': 'export interface Spare { b: number }\n',
+    };
+
+    test('deleting it is affected, though the import that named it only warns now', () => {
+      const { result, keys } = compare(files, { 'src/lib.ts': null });
+      assert.equal(result.affected, true);
+      assert.deepEqual(keys, ['src/lib.ts']);
+    });
+
+    test('deleting it behind lib/index.ts or a .js specifier is affected', () => {
+      const index = compare({ 'src/main.ts': files['src/main.ts'], 'src/lib/index.ts': files['src/lib.ts'] }, { 'src/lib/index.ts': null });
+      assert.equal(index.result.affected, true);
+      const js = compare({ ...files, 'src/main.ts': files['src/main.ts'].replace('./lib', './lib.js') }, { 'src/lib.ts': null });
+      assert.equal(js.result.affected, true);
+    });
+
+    test('deleting another file nothing imports is not affected', () => {
+      const { result } = compare(files, { 'src/spare.ts': null });
+      assert.equal(result.affected, false);
+    });
+  });
+
   describe('in an entry, where every export counts', () => {
     // A Next.js route handler: removing POST changes the routes the app serves.
     const entry = "export const revalidate = 60;\nexport function GET() { return 'ok'; }\nexport function POST() { return 'posted'; }\nconst spare = 1;\n";
@@ -1227,5 +1253,52 @@ describe('git mode: declaration order', () => {
       { 'src/lib.ts': 'const base = 1;\nexport const price = () => base;\n' }
     );
     assert.equal(result.affected, false);
+  });
+});
+
+describe('TypeScript syntax that runs', () => {
+  const main = { 'src/main.ts': "import { price } from './lib';\nconsole.log(price);\n" };
+  const reg = 'const reg = (n: number) => { (globalThis as any).n = n; return n; };\nexport const price = 1;\n';
+
+  test('an enum initializer that calls a function runs with the module', () => {
+    const lib = `${reg}export enum Level { Low = reg(1) }\n`;
+    const { result } = compare({ ...main, 'src/lib.ts': lib }, { 'src/lib.ts': lib.replace('reg(1)', 'reg(2)') });
+    assert.equal(result.affected, true);
+  });
+
+  test('an unused enum of constants does not count', () => {
+    const lib = 'export const price = 1;\nexport enum Level { Low = 1, High = Low * 2 }\n';
+    const { result } = compare({ ...main, 'src/lib.ts': lib }, { 'src/lib.ts': lib.replace('Low = 1', 'Low = 3') });
+    assert.equal(result.affected, false);
+  });
+
+  test('a statement in a namespace body runs with the module', () => {
+    const lib = `${reg}export namespace Setup { reg(1); }\n`;
+    const { result } = compare({ ...main, 'src/lib.ts': lib }, { 'src/lib.ts': lib.replace('reg(1)', 'reg(2)') });
+    assert.equal(result.affected, true);
+  });
+
+  test('an unused namespace that only declares things does not count', () => {
+    const lib = 'export const price = 1;\nexport namespace Shapes { export const sides = 4; export const area = (n: number) => n * n; export interface Box { w: number } }\n';
+    const { result } = compare({ ...main, 'src/lib.ts': lib }, { 'src/lib.ts': lib.replace('sides = 4', 'sides = 5').replace('n * n', 'n + n') });
+    assert.equal(result.affected, false);
+  });
+
+  describe('a file whose only module syntax is import x = require()', () => {
+    const files = {
+      'src/main.ts': "import lib = require('./lib');\nconsole.log(lib.price);\n",
+      'src/lib.ts': 'export const price = 1;\nexport const other = 2;\n',
+    };
+
+    test('a change to the member it reads is affected', () => {
+      const { result, keys } = compare(files, { 'src/lib.ts': files['src/lib.ts'].replace('price = 1', 'price = 3') });
+      assert.equal(result.affected, true);
+      assert.deepEqual(keys, ['src/lib.ts#price']);
+    });
+
+    test('a change to a member it does not read is not affected', () => {
+      const { result } = compare(files, { 'src/lib.ts': files['src/lib.ts'].replace('other = 2', 'other = 4') });
+      assert.equal(result.affected, false);
+    });
   });
 });

@@ -4,7 +4,7 @@ import { readText } from './fs.ts';
 import { DEPENDENCY_FIELDS } from './graph.ts';
 import { safeGlob } from './glob.ts';
 import { parseJsonc } from './jsonc.ts';
-import { isConfigEntry, loadProject, type Project } from './project.ts';
+import { isConfigEntry, loadProject, type Config, type Project } from './project.ts';
 
 /** `workspaces` in package.json (a list, or `{ packages }`) and `packages` in pnpm-workspace.yaml. */
 export const workspacePatterns = (root: string): string[] => {
@@ -54,7 +54,7 @@ export interface WorkspaceApp {
  * `devDependencies` and it has no `start` script (a server that end-to-end tests depend on is
  * an app). Packages without entries of their own are skipped.
  */
-export const workspaceApps = (root: string): WorkspaceApp[] => {
+export const workspaceApps = (root: string, config?: Config): WorkspaceApp[] => {
   const patterns = workspacePatterns(root);
   if (patterns.length === 0) throw new Error(`${root}: no workspaces in package.json or pnpm-workspace.yaml`);
   const globs = patterns.map(p => (p.startsWith('!') ? `!${p.slice(1)}/package.json` : `${p}/package.json`));
@@ -88,7 +88,7 @@ export const workspaceApps = (root: string): WorkspaceApp[] => {
     const path = relative(root, dir).split(sep).join('/');
     let project: Project;
     try {
-      project = loadProject({ cwd: dir });
+      project = loadProject({ cwd: dir, config });
     } catch (error) {
       apps.push({ path, error: String((error as Error).message ?? error) });
       continue;

@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { analyze } from '../src/index.ts';
-import { edit, fixture, initRepo, write } from './helpers.ts';
+import { app, edit, fixture, initRepo, write } from './helpers.ts';
 
 const CLI = join(import.meta.dirname, '../src/cli.ts');
 
@@ -168,5 +168,66 @@ describe('cli --json', () => {
       assert.ok(!out.includes('\\u0000'), 'no NUL');
     }
     assert.ok(JSON.parse(whyJson).matches[0].chain[0].endsWith('(entry)'));
+  });
+});
+
+describe('cli --strict', () => {
+  const widget = (text: string) => `'use client';\nexport const Used = () => <b>used</b>;\nexport const Unused = () => <i>${text}</i>;\n`;
+  const project = () =>
+    app({
+      'package.json': { name: 'shop', dependencies: { next: '16.0.0', react: '19.0.0' } },
+      'node_modules/next/package.json': { name: 'next', version: '16.0.0' },
+      'node_modules/react/package.json': { name: 'react', version: '19.0.0' },
+      'node_modules/react/jsx-runtime.js': 'exports.jsx = function () {};\n',
+      'app/page.tsx': "import { Used } from '../ui/widget';\nexport default function Page() { return <Used />; }\n",
+      'ui/widget.tsx': widget('one'),
+    });
+  const hash = (dir: string, ...flags: string[]) => run(['hash', '-C', dir, ...flags]).stdout.trim();
+
+  test('counts an unused export of a client module a server component imports', () => {
+    const dir = project();
+    const before = hash(dir, '--strict');
+    write(dir, 'ui/widget.tsx', widget('two'));
+    assert.notEqual(hash(dir, '--strict'), before);
+  });
+
+  test('without it, the same edit keeps the fingerprint', () => {
+    const dir = project();
+    const before = hash(dir);
+    write(dir, 'ui/widget.tsx', widget('two'));
+    assert.equal(hash(dir), before);
+  });
+});
+
+describe('cli --each with a manifest', () => {
+  const project = () =>
+    app({
+      'package.json': { name: 'app', private: true, type: 'module' },
+      'byakugan.json': { entry: ['src/math.ts'] },
+      'src/math.ts': 'export const add = (a: number, b: number) => a + b;\nexport const sub = (a: number, b: number) => a - b;\n',
+      'src/add.test.ts': "import { add } from './math';\nconsole.log(add(1, 2));\n",
+      'src/sub.test.ts': "import { sub } from './math';\nconsole.log(sub(1, 2));\n",
+    });
+  const each = ['--each', 'src/**/*.test.ts'];
+
+  test('hash --each saves a fingerprint per file, and affected --each compares with it', () => {
+    const dir = project();
+    const file = join(dir, 'out/tests.json');
+    assert.equal(run(['hash', '-C', dir, ...each, '--manifest', file]).code, 0);
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(file, 'utf8')).each), ['src/add.test.ts', 'src/sub.test.ts']);
+    assert.equal(run(['affected', '-C', dir, ...each, '--base-manifest', file]).stdout, '');
+    write(dir, 'src/sub.test.ts', 'console.log(1);\n');
+    const { code, stdout } = run(['affected', '-C', dir, ...each, '--base-manifest', file, '--exit-code']);
+    assert.equal(stdout, 'src/sub.test.ts\n');
+    assert.equal(code, 1);
+  });
+
+  test('a manifest written without --each is refused', () => {
+    const dir = project();
+    const file = join(dir, 'out/app.json');
+    assert.equal(run(['hash', '-C', dir, '--manifest', file]).code, 0);
+    const { code, stderr } = run(['affected', '-C', dir, ...each, '--base-manifest', file]);
+    assert.equal(code, 2);
+    assert.match(stderr, /has no per-file fingerprints/);
   });
 });

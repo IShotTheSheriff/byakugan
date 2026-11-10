@@ -19,14 +19,21 @@ import { diffVersions, LOCKFILES, parseLockfile } from './lockfile.ts';
 import type { ModuleInfo, ModuleRequest } from './parse.ts';
 import { isInNodeModules } from './resolve.ts';
 import { runTailwind } from './tailwind.ts';
+import { toolVersion } from './version.ts';
 
-export const MANIFEST_VERSION = 1;
+export const MANIFEST_VERSION = 2;
 
 /** Per-fragment hashes of everything the app uses. Save it on the base branch, compare on a PR. */
 export interface Manifest {
   version: number;
+  /** The byakugan version that wrote it. Another version may hash the same code differently. */
+  byakugan?: string;
+  /** The mode it was written in. `strict` holds fragments `behavior` leaves out. */
+  mode?: 'behavior' | 'strict';
   fingerprint: string;
   fragments: Record<string, string>;
+  /** Written with `--each`: per matched file, a fingerprint of the fragments that file reaches. */
+  each?: Record<string, string>;
 }
 
 export interface AffectedReason {
@@ -55,24 +62,44 @@ export interface AffectedResult {
   warnings: string[];
 }
 
-export const createManifest = (graph: UsageGraph): Manifest => {
+/** `each` adds per-file fingerprints, from `eachFingerprints`, for `affected --each --base-manifest`. */
+export const createManifest = (graph: UsageGraph, each?: Record<string, string>): Manifest => {
   const fragments: Record<string, string> = {};
   for (const key of [...graph.live.keys()].sort()) fragments[key] = graph.live.get(key)?.hash ?? '';
-  return { version: MANIFEST_VERSION, fingerprint: graph.fingerprint(), fragments };
+  const mode = graph.project.config.mode ?? 'behavior';
+  return { version: MANIFEST_VERSION, byakugan: toolVersion(), mode, fingerprint: graph.fingerprint(), fragments, ...(each ? { each } : {}) };
+};
+
+/**
+ * Why `base` cannot be compared with a graph built now, if it cannot. Comparing anyway would list
+ * hundreds of fragments as changed, with nothing to say that the manifest is the cause.
+ */
+export const manifestMismatch = (graph: UsageGraph, base: Manifest): string | undefined => {
+  const mode = graph.project.config.mode ?? 'behavior';
+  if (base.version !== MANIFEST_VERSION) return `the manifest has format ${base.version} and this byakugan writes format ${MANIFEST_VERSION}; save a new one`;
+  if (base.byakugan !== toolVersion()) {
+    return `the manifest was written by byakugan ${base.byakugan ?? '(unknown)'} and this is ${toolVersion()}, which may hash the same code differently; save a new one`;
+  }
+  if (base.mode !== mode) return `the manifest was written in ${base.mode ?? '(unknown)'} mode and this run is in ${mode} mode; use the same mode for both`;
 };
 
 export const readManifest = (file: string): Manifest => {
   const json = JSON.parse(readFileSync(file, 'utf8')) as Manifest | null;
   const fragments = json?.fragments;
+  const strings = (value: unknown) => typeof value === 'object' && value !== null && !Array.isArray(value) && Object.values(value).every(v => typeof v === 'string');
+  const text = (value: unknown) => value === undefined || typeof value === 'string';
   const valid =
+    text(json?.byakugan) &&
+    text(json?.mode) &&
+    (json?.each === undefined || strings(json.each)) &&
     typeof json === 'object' &&
     json !== null &&
-    json.version === MANIFEST_VERSION &&
+    typeof json.version === 'number' &&
     typeof fragments === 'object' &&
     fragments !== null &&
     !Array.isArray(fragments) &&
     Object.values(fragments).every(v => typeof v === 'string');
-  if (!valid) throw new Error(`${file} is not a byakugan manifest (version ${MANIFEST_VERSION})`);
+  if (!valid) throw new Error(`${file} is not a byakugan manifest`);
   return json;
 };
 
@@ -90,6 +117,11 @@ const unresolvedReasons = (graph: UsageGraph): AffectedReason[] =>
 
 /** Exact comparison, node_modules included: both sides were hashed from installed code. */
 export const affectedSinceManifest = (graph: UsageGraph, base: Manifest): AffectedResult => {
+  const mismatch = manifestMismatch(graph, base);
+  if (mismatch) {
+    const reasons: AffectedReason[] = [{ kind: 'manifest', key: 'manifest', detail: mismatch, chain: [] }];
+    return { affected: true, fingerprint: graph.fingerprint(), reasons, ignored: [], warnings: [...graph.warnings] };
+  }
   const reasons: AffectedReason[] = unresolvedReasons(graph);
   for (const [key, fragment] of graph.live) {
     const before = base.fragments[key];
@@ -547,6 +579,7 @@ export const affectedSinceCommit = (graph: UsageGraph, base: string): AffectedRe
             : project.namedFiles.includes(file)
               ? 'a config file names it'
               : (pointedAt(graph, file) ??
+                (typeImportOf(graph, file) ? 'an import type named it and no longer resolves' : undefined) ??
                 (CODE_FILE.test(file) && liveStems.has(stem(file)) ? 'an import that resolved to it now resolves to another file' : undefined));
         if (where) {
           reasons.push({ kind: 'source', key: graph.fileKey(file), detail: `deleted (${where})`, chain: [] });
@@ -615,6 +648,17 @@ export const affectedSinceCommit = (graph: UsageGraph, base: string): AffectedRe
 
   return { affected: reasons.length > 0, fingerprint: graph.fingerprint(), base: commit, reasons, ignored, warnings };
 };
+
+/**
+ * A deleted file that an `import type` named. The head graph only warns about a type import that
+ * does not resolve, so without this the types the base side read from the file vanish unseen.
+ */
+const typeImportOf = (graph: UsageGraph, file: string): boolean =>
+  graph.unresolved.some(u => {
+    if (!u.type) return false;
+    const bases = u.specifier.startsWith('.') ? [resolve(dirname(u.from), u.specifier)] : graph.project.aliasTargets(u.specifier);
+    return bases.some(b => file === b || stem(file) === b || stem(file) === stem(b) || (dirname(file) === b && basename(file).startsWith('index.')));
+  });
 
 /** Why a deleted file still mattered: a computed import, a directory the code reads, or a path in the code. */
 const pointedAt = (graph: UsageGraph, file: string): string | undefined => {

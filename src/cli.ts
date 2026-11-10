@@ -3,10 +3,11 @@ import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { compareBuilds } from './compare.ts';
 import { affectedSinceCommit, affectedSinceManifest, createManifest, readManifest } from './affected.ts';
-import { UsageGraph } from './graph.ts';
+import { UsageGraph, type ModuleCache } from './graph.ts';
 import { isConfigEntry, loadProject } from './project.ts';
 import { describeNode, formatAffected, formatDot, formatGraph, formatMermaid, formatWhy, safe, summarize, why } from './report.ts';
-import { eachProject, entriesReaching } from './select.ts';
+import { eachFingerprints, eachProject, eachSinceManifest, entriesReaching } from './select.ts';
+import { toolVersion } from './version.ts';
 import { workspaceApps } from './workspace.ts';
 
 const HELP = `byakugan: the graph of code your app actually uses
@@ -30,7 +31,11 @@ Options
       --verbose              List every reason and ignored change (affected)
       --each <glob>          One verdict per matching file, e.g. per test (affected).
                              Prints the files a change reaches, one per line.
+                             With hash --manifest, saves one fingerprint per file.
       --maps                 Compare source maps too (compare)
+      --strict               Promise the same build output, not only the same behavior:
+                             also count code the bundler ships but nothing runs.
+                             Same as "mode": "strict" in byakugan.json.
       --workspace            Run hash or affected for every app in the workspace at -C.
                              --manifest and --base-manifest then name directories.
   -h, --help
@@ -42,10 +47,7 @@ In GitHub Actions, hash and affected also write fingerprint= and affected= to $G
 and affected writes a summary to $GITHUB_STEP_SUMMARY. With --workspace they write apps=,
 a JSON list of the affected app directories, and fingerprints=, a JSON object.`;
 
-const version = () => {
-  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  return manifest.version;
-};
+const version = toolVersion;
 
 const githubOutput = (values: Record<string, string>) => {
   const file = process.env.GITHUB_OUTPUT;
@@ -82,16 +84,19 @@ interface Values {
   'base-manifest'?: string;
   'exit-code'?: boolean;
   verbose?: boolean;
+  strict?: boolean;
 }
 
 /** `--workspace`: one verdict per app. An app that fails to build a graph counts as affected. */
 const workspaceMain = (command: string, root: string, values: Values): number => {
-  const apps = workspaceApps(root);
+  const apps = workspaceApps(root, values.strict ? { mode: 'strict' } : undefined);
+  // Apps share packages, so each file is parsed once for the whole run.
+  const cache: ModuleCache = new Map();
   const results: Array<{ app: string; affected: boolean; fingerprint: string; reason: string; error?: string; warnings: string[] }> = [];
   for (const { path, project, error } of apps) {
     try {
       if (!project) throw new Error(error);
-      const graph = new UsageGraph(project).build();
+      const graph = new UsageGraph(project, undefined, cache).build();
       if (command === 'hash') {
         if (values.manifest) {
           mkdirSync(values.manifest, { recursive: true });
@@ -152,6 +157,7 @@ const main = (argv: string[]): number => {
       'exit-code': { type: 'boolean' },
       verbose: { type: 'boolean' },
       workspace: { type: 'boolean' },
+      strict: { type: 'boolean' },
       each: { type: 'string', multiple: true },
       maps: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -194,8 +200,8 @@ const main = (argv: string[]): number => {
     return 2;
   }
 
-  if (values.each && (command !== 'affected' || values.workspace)) {
-    console.error('--each works with affected, without --workspace');
+  if (values.each && ((command !== 'affected' && command !== 'hash') || values.workspace)) {
+    console.error('--each works with affected and hash, without --workspace');
     return 2;
   }
   if (values.workspace) {
@@ -206,7 +212,7 @@ const main = (argv: string[]): number => {
     return workspaceMain(command, realpathSync(resolve(values.cwd ?? process.cwd())), values);
   }
 
-  const loaded = loadProject({ cwd: values.cwd });
+  const loaded = loadProject({ cwd: values.cwd, config: values.strict ? { mode: 'strict' } : undefined });
   const selection = values.each ? eachProject(loaded, values.each) : undefined;
   const project = selection?.project ?? loaded;
   if (selection && selection.each.length === 0) {
@@ -233,7 +239,9 @@ const main = (argv: string[]): number => {
     const fingerprint = graph.fingerprint();
     if (values.manifest) {
       mkdirSync(dirname(values.manifest), { recursive: true });
-      writeFileSync(values.manifest, `${JSON.stringify(createManifest(graph), null, 2)}\n`);
+      // With --each the manifest also holds one fingerprint per matched file.
+      const each = selection ? eachFingerprints(graph, selection.each) : undefined;
+      writeFileSync(values.manifest, `${JSON.stringify(createManifest(graph, each), null, 2)}\n`);
     }
     githubOutput({ fingerprint });
     if (values.json) console.log(JSON.stringify({ fingerprint, fragments: graph.live.size, warnings: graph.warnings }));
@@ -254,11 +262,14 @@ const main = (argv: string[]): number => {
     return 0;
   }
 
-  const result = values['base-manifest']
-    ? affectedSinceManifest(graph, readManifest(values['base-manifest']))
-    : affectedSinceCommit(graph, values.base as string);
+  const baseManifest = values['base-manifest'] ? readManifest(values['base-manifest']) : undefined;
+  if (selection && baseManifest && !baseManifest.each) {
+    console.error(`${safe(values['base-manifest'] ?? '')} has no per-file fingerprints. Write it with: byakugan hash --each <the same globs> --manifest <file>`);
+    return 2;
+  }
+  const result = baseManifest ? affectedSinceManifest(graph, baseManifest) : affectedSinceCommit(graph, values.base as string);
   if (selection) {
-    const reached = entriesReaching(graph, result.reasons, selection.each, values.each ?? []);
+    const reached = baseManifest ? eachSinceManifest(graph, selection.each, baseManifest) : entriesReaching(graph, result.reasons, selection.each, values.each ?? []);
     githubOutput({ affected: String(reached.files.length > 0), each: JSON.stringify(reached.files) });
     if (values.json) console.log(JSON.stringify({ ...result, reasons: readableChains(graph, result.reasons), affected: reached.files.length > 0, all: reached.all, each: reached.files }, null, 2));
     else {

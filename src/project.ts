@@ -41,7 +41,16 @@ export interface Config {
    * Added to the ones the framework inlines at build time, `NEXT_PUBLIC_*` or `VITE_*`.
    */
   env?: string[];
+  /**
+   * What a verdict promises. `behavior` (the default): an unaffected app runs the same, so its
+   * tests can be skipped. `strict`: its build output is the same too, so the build can be reused.
+   * `strict` also counts code the bundler ships but nothing runs.
+   */
+  mode?: Mode;
 }
+
+export type Mode = 'behavior' | 'strict';
+const MODES = ['behavior', 'strict'];
 
 export interface Project {
   dir: string;
@@ -790,6 +799,7 @@ const checkConfig = (file: string, value: unknown): Config => {
   if (config.framework !== undefined && !FRAMEWORKS.includes(config.framework as string)) {
     throw new Error(`${file}: "framework" must be one of ${FRAMEWORKS.join(', ')}`);
   }
+  if (config.mode !== undefined && !MODES.includes(config.mode as string)) throw new Error(`${file}: "mode" must be one of ${MODES.join(', ')}`);
   if (config.jsxImportSource !== undefined && typeof config.jsxImportSource !== 'string') throw new Error(`${file}: "jsxImportSource" must be a string`);
   const rules = config.modularizeImports;
   if (rules !== undefined && (typeof rules !== 'object' || rules === null || Array.isArray(rules))) {

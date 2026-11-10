@@ -31,7 +31,12 @@ README.md explains the model and its limits; read it first.
   print. `reachedFrom` and `fragmentVias` record every node, for `--each`. Two fragments exist only in the graph, not in `moduleFragments`:
   `<imports>` (the ordered effectful imports of a project module) and `<raw>`
   (the whole text of a JS file imported with `?raw` or `?url`). Git mode
-  checks them separately.
+  checks them separately. In `strict` mode, in a Next.js app, `useClientReferences`
+  marks every export of a `'use client'` module that a server module imports,
+  because Next.js ships such a module whole.
+- Modes: `behavior` (default) counts code the app can run, `strict` also counts
+  code the bundler ships that nothing runs. A rule that exists only to match
+  build output byte for byte belongs behind `project.config.mode === 'strict'`.
 - `src/resolve.ts`: oxc-resolver with browser, node and (Next.js) `react-server`
   condition sets, `modularizeImports`, `sideEffects`, and a `style` condition
   set for package stylesheets. React Native adds a `react-native` set and
@@ -49,9 +54,14 @@ README.md explains the model and its limits; read it first.
 - `src/project.ts`: framework detection, entries, inputs, tracked packages.
   `FRAMEWORK_GENERATED` and `FRAMEWORK_VIRTUAL` merge into `generated` and
   `virtual`, and `aliases` holds `$lib` and Nuxt's `~`.
-- `src/workspace.ts`: the apps of a workspace for `--workspace`.
+- `src/workspace.ts`: the apps of a workspace for `--workspace`. The CLI gives
+  every app's graph one `ModuleCache` (graph.ts), keyed by parse options and
+  path, so a shared file is parsed once. Graphs must not change a `ModuleInfo`.
 - `src/select.ts`: `--each`, the files that a change reaches, found by walking
-  `reachedFrom` back from each reason to the roots.
+  `reachedFrom` back from each reason to the roots. Against a manifest it
+  compares `eachFingerprints` instead, one hash per matched file over the
+  fragments that file reaches, since a fragment that left the graph gives the
+  walk nowhere to start.
 - `src/compare.ts`: `byakugan compare`, two build outputs without per-build
   noise.
 - `src/affected.ts`: git mode (fragments of base vs working tree, lockfile diff,
@@ -113,3 +123,8 @@ the real `tailwindcss` (v4) and `tailwindcss3` devDependencies into its
 fixtures. Every precision claim has a
 paired test that fails if the tool gets too coarse and one that fails if it
 gets too lax. Keep both when adding a case.
+
+`test/differential.test.ts` applies seeded random edits and fails when the
+fingerprint moves while git mode says unaffected. Run more seeds with
+`BYAKUGAN_SEEDS=1-2000 node --test test/differential.test.ts` after a change to
+git mode, and add a new import form to its `FILES` when the graph learns one.

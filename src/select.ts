@@ -1,4 +1,5 @@
-import type { AffectedReason } from './affected.ts';
+import { createHash } from 'node:crypto';
+import { manifestMismatch, type AffectedReason, type Manifest } from './affected.ts';
 import { parseNodeId, type UsageGraph } from './graph.ts';
 import { globMatcher, safeGlob } from './glob.ts';
 import { isConfigEntry, type Project } from './project.ts';
@@ -96,4 +97,84 @@ const startNodes = (graph: UsageGraph, reason: AffectedReason): string[] | undef
     for (const [key, set] of graph.fragmentVias) if (key.startsWith(`npm:${reason.key}/`) || key.startsWith(`npm:${reason.key}#`)) out.push(...set);
     return out.length > 0 ? out : undefined;
   }
+};
+
+/**
+ * Per matched file, a fingerprint of the fragments that file reaches: its own slice of the graph.
+ * A fragment that a config entry, an input or a tracked package version reaches belongs to every
+ * file, as in `entriesReaching`.
+ *
+ * Root sets flow forward over the graph as bitsets, one bit per matched file plus one for "every
+ * file", until nothing changes. Then each fragment joins the fingerprint of every file whose bit
+ * one of its vias holds.
+ */
+export const eachFingerprints = (graph: UsageGraph, each: string[]): Record<string, string> => {
+  const index = new Map(each.map((file, i) => [file, i]));
+  const everyone = each.length;
+  const words = (each.length + 32) >>> 5;
+  const sets = new Map<string, Uint32Array>();
+  const setOf = (id: string) => {
+    let set = sets.get(id);
+    if (!set) sets.set(id, (set = new Uint32Array(words)));
+    return set;
+  };
+  const forward = new Map<string, string[]>();
+  for (const [id, froms] of graph.reachedFrom) {
+    for (const from of froms) {
+      const list = forward.get(from);
+      if (list) list.push(id);
+      else forward.set(from, [id]);
+    }
+  }
+  const work: string[] = [];
+  for (const [id, parent] of graph.parents) {
+    if (parent !== null) continue;
+    const { kind, file } = parseNodeId(id);
+    const bit = kind === 'S' ? (index.get(file) ?? everyone) : everyone;
+    setOf(id)[bit >>> 5] |= 1 << (bit & 31);
+    work.push(id);
+  }
+  while (work.length > 0) {
+    const id = work.pop() as string;
+    const from = setOf(id);
+    for (const to of forward.get(id) ?? []) {
+      const set = setOf(to);
+      let grew = false;
+      for (let w = 0; w < words; w++) {
+        const next = set[w] | from[w];
+        if (next !== set[w]) {
+          set[w] = next;
+          grew = true;
+        }
+      }
+      if (grew) work.push(to);
+    }
+  }
+  const hashes = each.map(() => createHash('sha256'));
+  const merged = new Uint32Array(words);
+  for (const key of [...graph.live.keys()].sort()) {
+    merged.fill(0);
+    for (const via of graph.fragmentVias.get(key) ?? []) {
+      const set = sets.get(via);
+      if (set) for (let w = 0; w < words; w++) merged[w] |= set[w];
+    }
+    const line = `${key}\0${graph.live.get(key)?.hash ?? ''}\n`;
+    const all = (merged[everyone >>> 5] & (1 << (everyone & 31))) !== 0;
+    for (let i = 0; i < each.length; i++) if (all || (merged[i >>> 5] & (1 << (i & 31))) !== 0) hashes[i].update(line);
+  }
+  return Object.fromEntries(each.map((file, i) => [graph.fileKey(file), hashes[i].digest('hex')]));
+};
+
+/**
+ * Which of `each` differ from a manifest written with `hash --each`: the files whose own
+ * fingerprint moved, and files the manifest does not know. Exact where `entriesReaching` has to
+ * give up: a fragment a file no longer uses is gone from the graph, so no walk starts from it.
+ */
+export const eachSinceManifest = (graph: UsageGraph, each: string[], base: Manifest): EachResult => {
+  const head = eachFingerprints(graph, each);
+  const files = Object.keys(head).sort();
+  // An import that does not resolve hides what is behind it from every file.
+  const blind = graph.unresolved.some(u => !u.type && graph.isProjectImport(u));
+  if (blind || manifestMismatch(graph, base) || !base.each) return { all: true, files };
+  return { all: false, files: files.filter(file => base.each?.[file] !== head[file]) };
 };

@@ -116,6 +116,25 @@ Prints a SHA-256 fingerprint of every fragment the app uses. Equal fingerprints
 mean the app's inputs are equal, installed dependencies included. Use it as a
 cache key. `--manifest <file>` also writes the per-fragment hashes.
 
+### Modes
+
+A verdict promises one of two things, and `"mode"` in `byakugan.json` picks
+which.
+
+`behavior` is the default. An unaffected app runs the same as before, so you
+can skip its end-to-end tests. byakugan counts the code the app can run.
+
+`strict` promises the same build output too, so you can reuse a build or skip
+a deploy. It also counts code the bundler ships but nothing runs. Today that is
+one case. Next.js ships a `'use client'` module whole when a server component
+imports it, so an unused export next to a used one changes the client chunk.
+`behavior` ignores that export and `strict` counts it.
+
+`--strict` on `graph`, `hash`, `affected` and `why` does the same as
+`"mode": "strict"`. The two modes give different fingerprints for such an app.
+A manifest records its mode, and a run in the other mode reports "affected"
+and says why.
+
 ### `byakugan affected`
 
 Answers "does this change reach the app?" in one of two ways.
@@ -194,7 +213,9 @@ API whose types the web app imports (Hono RPC) is a dependency of the web app,
 so give it a `byakugan.json` to get a verdict. An app whose graph fails, for
 example over an invalid `byakugan.json`, counts as affected. With
 `--workspace`, `--manifest` and `--base-manifest` name directories that hold
-one manifest per app.
+one manifest per app. A file that several apps reach is parsed once per run.
+On a synthetic workspace of 8 apps over one 6,000-module package, that took a
+run from 34 s to 8 s.
 
 ### `byakugan compare <base> <fresh>`
 
@@ -206,8 +227,9 @@ Source maps embed the
 source, so a comment or formatting edit changes them. `compare` skips `.map`
 files unless you pass `--maps`.
 
-This is how you check byakugan itself. When `affected` says unaffected, a
-build of the change should match a build of the base. On `bobr`, a Next.js 16
+This is how you check byakugan itself. When `affected --strict` says
+unaffected, a build of the change should match a build of the base. The
+default `behavior` mode allows the builds to differ in code nothing runs. On `bobr`, a Next.js 16
 monorepo built with Turbopack, two builds of one commit matched. A Prettier run
 over 14 used files with other settings matched too, apart from source maps. A
 change to a function the app uses gave 8 different files. Webpack builds are
@@ -301,7 +323,7 @@ runs every test.
 ```yaml
 - run: npm ci
 - id: web
-  run: npx --no-install byakugan hash -C apps/web
+  run: npx --no-install byakugan hash -C apps/web --strict
 - id: cache
   uses: actions/cache@v6
   with:
@@ -312,22 +334,58 @@ runs every test.
 ```
 
 This covers dependency updates exactly, because the fingerprint hashes the
-installed files the app uses.
+installed files the app uses. `--strict` makes the key cover everything the
+build emits. Leave it out when the key guards a test run.
 
 ### Exact comparison against main
 
-Save a manifest on `main`, compare with it on pull requests:
+Save a manifest on `main` under the commit's SHA. On a pull request, restore
+the one for the merge base and compare with it. Without a manifest for that
+commit, fall back to git mode:
 
 ```yaml
 # on push to main
 - run: npx --no-install byakugan hash -C apps/web --manifest .byakugan/web.json
-- uses: actions/upload-artifact@v6
-  with: { name: byakugan-web, path: .byakugan/web.json }
+- uses: actions/cache/save@v6
+  with:
+    path: .byakugan/web.json
+    key: byakugan-web-${{ github.sha }}
 
-# on pull_request, after downloading that artifact
+# on pull_request
+- id: base
+  env:
+    BASE_REF: ${{ github.base_ref }}
+  run: echo "sha=$(git merge-base "origin/$BASE_REF" HEAD)" >> "$GITHUB_OUTPUT"
+- id: manifest
+  uses: actions/cache/restore@v6
+  with:
+    path: .byakugan/web.json
+    key: byakugan-web-${{ steps.base.outputs.sha }}
 - id: web
-  run: npx --no-install byakugan affected -C apps/web --base-manifest .byakugan/web.json
+  env:
+    BASE_SHA: ${{ steps.base.outputs.sha }}
+    HAVE_MANIFEST: ${{ steps.manifest.outputs.cache-hit }}
+  run: |
+    if [ "$HAVE_MANIFEST" = "true" ]; then
+      npx --no-install byakugan affected -C apps/web --base-manifest .byakugan/web.json
+    else
+      npx --no-install byakugan affected -C apps/web --base "$BASE_SHA"
+    fi
 ```
+
+The manifest has to come from the merge base. One from a newer `main` counts
+other people's changes as yours. A manifest records the byakugan version and
+the mode that wrote it, and a run with another version or mode reports
+"affected" with that as its one reason.
+
+For one verdict per test file, write the manifest with the same `--each`
+globs: `byakugan hash --each 'src/**/*.test.ts' --manifest tests.json`. It then
+holds a fingerprint per file, over the code that file reaches, and
+`affected --each ... --base-manifest tests.json` prints the files whose
+fingerprint moved. A test that drops an import is reached, and no other.
+
+[examples/github-actions-e2e.yml](examples/github-actions-e2e.yml) is this
+recipe as a full workflow that skips end-to-end tests.
 
 ### Check byakugan against real builds
 
@@ -339,7 +397,7 @@ merge base and compare the two:
 - id: web
   env:
     BASE_REF: ${{ github.base_ref }}
-  run: npx --no-install byakugan affected -C apps/web --base "origin/$BASE_REF"
+  run: npx --no-install byakugan affected -C apps/web --strict --base "origin/$BASE_REF"
 - run: npm run build --workspace web
 - if: steps.web.outputs.affected == 'false'
   env:
@@ -487,6 +545,7 @@ follows these too:
 | `new URL('./worker.ts', import.meta.url)`                         | `worker.ts` and what it imports                                      |
 | `` join(process.cwd(), 'content', 'posts', `${slug}.md`) ``       | Every file under `content/posts`                                     |
 | `'use server'` at the top of a file                               | Every export, since Next.js may register each one as an endpoint     |
+| `'use client'` in a file a server component imports, with `strict` | Every export, since Next.js ships that module to the browser whole  |
 | `@import "tw-animate-css"`, `@import "shadcn/tailwind.css"`       | The package stylesheet, resolved with the `style` export condition   |
 | `@use 'tokens'`, `url("./bg.png")` in a stylesheet                | `_tokens.scss`, `bg.png`                                             |
 | `@import "/src/theme.css"`, `url("@/assets/hero.png")`            | `src/theme.css` under the project root, the file the alias names     |
@@ -531,6 +590,8 @@ Base UI, lucide-react), git mode gives these results:
 | The `next/font/local` font file, edited or deleted             | affected   |
 | A font read with `fs` in `opengraph-image.tsx`                 | affected   |
 | An unused export in a `'use server'` file                      | affected   |
+| An unused export in a `'use client'` file                      | unaffected |
+| The same with `--strict`, when a server component imports it   | affected   |
 | `pages/api` and `app/api` routes, `middleware.ts`, a new page  | affected   |
 | `next/dynamic` and `React.lazy` targets, an intercepting route | affected   |
 | `tw-animate-css` or `@tailwindcss/turbopack` bumped            | affected   |
@@ -635,6 +696,7 @@ Everything is optional. Put a `byakugan.json` next to the app's `package.json`:
 | `generated`         | Git-ignored files the build generates, such as a Prisma client. Git mode skips its "ignored by git" reason for them. List the generator's inputs in `inputs`. |
 | `virtual`           | Specifiers a bundler plugin provides (globs), such as `~icons/**` for unplugin-icons. They no longer count as unresolved. |
 | `env`               | Environment variables whose values count when live code reads them (globs over names), such as `API_*`. |
+| `mode`              | `behavior` (default) or `strict`. See [Modes](#modes).                                                          |
 
 byakugan rejects a `byakugan.json` that is not valid JSON or has a field of
 the wrong type, for example a string where a list belongs.

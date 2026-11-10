@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { analyze, loadProject, UsageGraph, type ModuleCache } from '../src/index.ts';
 import { workspaceApps, workspacePatterns } from '../src/workspace.ts';
 import { app } from './helpers.ts';
 
@@ -42,3 +44,53 @@ describe('workspace patterns', () => {
   });
 });
 
+
+describe('a module cache shared by the apps of a workspace', () => {
+  const files = {
+    'package.json': { name: 'root', private: true, workspaces: ['apps/*', 'packages/*'] },
+    'packages/ui/package.json': { name: 'ui' },
+    'packages/ui/src/index.tsx': "import { type Size, size } from './size';\nexport const Box = (p: { s: Size }) => <div>{size(p.s)}</div>;\nexport const Unused = () => <i />;\n",
+    'packages/ui/src/size.ts': "console.log('size loaded');\nexport type Size = 1 | 2;\nexport const size = (s: Size) => s * 2;\n",
+    'packages/ui/src/broken.ts': 'export const = ;\n',
+    // One app compiles JSX with the classic runtime and keeps `import { type X }`, the other does neither.
+    'apps/a/package.json': { name: 'a' },
+    'apps/a/byakugan.json': { entry: ['main.tsx'] },
+    'apps/a/tsconfig.json': { compilerOptions: { jsx: 'react', verbatimModuleSyntax: true } },
+    'apps/a/main.tsx': "import { Box } from '../../packages/ui/src/index';\nimport '../../packages/ui/src/broken';\nconsole.log(Box);\n",
+    'apps/b/package.json': { name: 'b' },
+    'apps/b/byakugan.json': { entry: ['main.tsx'] },
+    'apps/b/tsconfig.json': { compilerOptions: { jsx: 'react-jsx' } },
+    'apps/b/main.tsx': "import { Box } from '../../packages/ui/src/index';\nimport '../../packages/ui/src/broken';\nconsole.log(Box);\n",
+  };
+
+  test('gives every app the graph it gets alone, warnings included', () => {
+    const dir = app(files, { repo: true });
+    const cache: ModuleCache = new Map();
+    for (const name of ['a', 'b', 'a']) {
+      const alone = analyze({ cwd: join(dir, 'apps', name) });
+      const shared = new UsageGraph(loadProject({ cwd: join(dir, 'apps', name) }), undefined, cache).build();
+      assert.equal(shared.fingerprint(), alone.fingerprint(), name);
+      assert.deepEqual([...shared.live.keys()].sort(), [...alone.live.keys()].sort(), name);
+      assert.deepEqual(shared.warnings, alone.warnings, name);
+      assert.ok(alone.warnings.some(w => w.includes('broken.ts: parse error')), alone.warnings.join('\n'));
+    }
+  });
+
+  test('keeps apps with different compiler settings apart', () => {
+    const dir = app(files, { repo: true });
+    const cache: ModuleCache = new Map();
+    const [a, b] = ['a', 'b'].map(name => new UsageGraph(loadProject({ cwd: join(dir, 'apps', name) }), undefined, cache).build());
+    // Under `verbatimModuleSyntax`, `import { type Size, size }` is the same; the JSX runtime differs.
+    assert.notDeepEqual([...a.live.keys()].sort(), [...b.live.keys()].sort());
+  });
+
+  test('parses a shared file once', () => {
+    const dir = app({ ...files, 'apps/b/tsconfig.json': files['apps/a/tsconfig.json'] }, { repo: true });
+    const cache: ModuleCache = new Map();
+    new UsageGraph(loadProject({ cwd: join(dir, 'apps/a') }), undefined, cache).build();
+    const size = cache.size;
+    new UsageGraph(loadProject({ cwd: join(dir, 'apps/b') }), undefined, cache).build();
+    // Only app b's own entry is new.
+    assert.equal(cache.size, size + 1);
+  });
+});
