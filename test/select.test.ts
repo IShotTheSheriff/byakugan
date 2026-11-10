@@ -254,3 +254,36 @@ describe('a manifest that cannot be compared', () => {
     assert.equal(affectedSinceManifest(graph, createManifest(graph)).affected, false);
   });
 });
+
+describe('affected --each with Storybook', () => {
+  const stories = {
+    ...files,
+    '.storybook/main.ts': "export default { stories: ['../src/**/*.stories.ts'] };\n",
+    '.storybook/preview.ts': "import { theme } from '../src/theme';\nexport const parameters = { theme };\n",
+    'src/theme.ts': "export const theme = 'light';\n",
+    'src/button.stories.ts': "import { Button } from './ui';\nexport default { component: Button };\n",
+    'src/card.stories.ts': "import { Card } from './ui';\nexport default { component: Card };\n",
+  };
+  const reached = (edits: Record<string, string>) => {
+    const dir = app(stories, { repo: true });
+    for (const [path, content] of Object.entries(edits)) write(dir, path, content);
+    const patterns = ['src/**/*.stories.ts'];
+    const selection = eachProject(loadProject({ cwd: dir }), patterns);
+    const graph = new UsageGraph(selection.project).build();
+    return entriesReaching(graph, affectedSinceCommit(graph, 'main').reasons, selection.each, patterns);
+  };
+
+  test('a component reaches only its story', () => {
+    assert.deepEqual(reached({ 'src/ui/Card.ts': "export const Card = () => 'card!';\n" }), { all: false, files: ['src/card.stories.ts'] });
+  });
+
+  test('what .storybook/preview imports reaches every story', () => {
+    const result = reached({ 'src/theme.ts': "export const theme = 'dark';\n" });
+    assert.equal(result.all, true);
+    assert.equal(result.files.length, 2);
+  });
+
+  test('.storybook/main reaches every story', () => {
+    assert.equal(reached({ '.storybook/main.ts': "export default { stories: ['../src/**/*.stories.ts'], addons: [] };\n" }).all, true);
+  });
+});

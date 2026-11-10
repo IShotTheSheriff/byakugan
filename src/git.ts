@@ -26,7 +26,11 @@ export const mergeBase = (cwd: string, base: string): { commit: string; exact: b
   try {
     return { commit: git(cwd, ['merge-base', base, 'HEAD']).trim(), exact: true };
   } catch {
-    return { commit: git(cwd, ['rev-parse', '--verify', `${base}^{commit}`]).trim(), exact: false };
+    try {
+      return { commit: git(cwd, ['rev-parse', '--verify', `${base}^{commit}`]).trim(), exact: false };
+    } catch {
+      throw new Error(`"${base}" is not a commit in this clone`);
+    }
   }
 };
 

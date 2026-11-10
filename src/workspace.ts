@@ -47,7 +47,7 @@ export interface WorkspaceApp {
 }
 
 /**
- * Workspace packages that are apps: a detected framework, a Cloudflare Worker, a `byakugan.json`,
+ * Workspace packages and Nx projects that are apps: an Nx `projectType` of `application`, a detected framework, a Cloudflare Worker, a `byakugan.json`,
  * or a package that is not a library. A library is imported by the apps that use it, so its own
  * verdict says nothing. A package is a library when another workspace package lists it in
  * `dependencies`, `peerDependencies` or `optionalDependencies`, or lists it only in
@@ -56,12 +56,28 @@ export interface WorkspaceApp {
  */
 export const workspaceApps = (root: string, config?: Config): WorkspaceApp[] => {
   const patterns = workspacePatterns(root);
-  if (patterns.length === 0) throw new Error(`${root}: no workspaces in package.json or pnpm-workspace.yaml`);
+  const nx = existsSync(join(root, 'nx.json'));
+  if (patterns.length === 0 && !nx) throw new Error(`${root}: no workspaces in package.json or pnpm-workspace.yaml, and no nx.json`);
+  const ignore = ['**/node_modules/**', '**/.git/**'];
   const globs = patterns.map(p => (p.startsWith('!') ? `!${p.slice(1)}/package.json` : `${p}/package.json`));
-  const dirs = safeGlob(globs, { cwd: root, ignore: ['**/node_modules/**', '**/.git/**'] })
-    .map(file => dirname(file))
-    .filter(dir => dir !== root)
-    .sort();
+  const packageDirs = globs.length === 0 ? [] : safeGlob(globs, { cwd: root, ignore }).map(file => dirname(file));
+  // Nx projects need no package.json. One whose project.json says "application" is an app; a
+  // library gets a verdict only with a byakugan.json, like any other library.
+  const nxApps = new Set<string>();
+  if (nx) {
+    for (const file of safeGlob(['**/project.json'], { cwd: root, ignore: [...ignore, '**/dist/**', '**/.nx/**'] })) {
+      const dir = dirname(file);
+      if (packageDirs.includes(dir)) continue;
+      let type: unknown;
+      try {
+        type = (parseJsonc(readText(file) ?? '{}') as { projectType?: unknown } | undefined)?.projectType;
+      } catch {
+        continue;
+      }
+      if (type === 'application' || existsSync(join(dir, 'byakugan.json'))) nxApps.add(dir);
+    }
+  }
+  const dirs = [...new Set([...packageDirs, ...nxApps])].filter(dir => dir !== root).sort();
   const names = new Map<string, Record<string, unknown>>();
   for (const dir of dirs) {
     const manifest = parseJsonc(readText(join(dir, 'package.json')) ?? '{}') as Record<string, unknown> | undefined;
@@ -94,7 +110,7 @@ export const workspaceApps = (root: string, config?: Config): WorkspaceApp[] => 
       continue;
     }
     if (project.entries.length === 0 || project.entries.every(isConfigEntry)) continue;
-    const app = project.framework !== 'none' || project.workers || existsSync(join(dir, 'byakugan.json')) || !isLibrary(names.get(dir));
+    const app = nxApps.has(dir) || project.framework !== 'none' || project.workers || existsSync(join(dir, 'byakugan.json')) || !isLibrary(names.get(dir));
     if (app) apps.push({ path, project });
   }
   return apps;

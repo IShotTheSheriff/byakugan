@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import type { AffectedResult } from './affected.ts';
 import { parseNodeId, type UsageGraph } from './graph.ts';
 import { isInNodeModules } from './resolve.ts';
+import { PLAIN, type Line, type Style } from './ui.ts';
 
 export interface FileSummary {
   key: string;
@@ -48,7 +49,12 @@ export interface GraphSummary {
  */
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
 export const safe = (text: string) => text.replace(CONTROL, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-const lines = (out: string[]) => out.map(line => safe(line.replace(/[\r\n]/g, ' '))).join('\n');
+const clean = (text: string) => safe(text.replace(/[\r\n]/g, ' '));
+/** Escapes every piece, then paints it, so repository text can never hold an escape sequence. */
+const lines = (out: Line[], style: Style = PLAIN) =>
+  out
+    .map(line => (typeof line === 'string' ? clean(line) : line.map(part => (typeof part === 'string' ? clean(part) : style.paint(part[0], clean(part[1])))).join('')))
+    .join('\n');
 
 const byKey = <T extends { key: string }>(a: T, b: T) => a.key.localeCompare(b.key);
 
@@ -134,20 +140,21 @@ const list = (names: string[], max = 6) =>
 
 const pad = (s: string, n: number) => (s.length >= n ? `${s}  ` : s + ' '.repeat(n - s.length));
 
-export const formatGraph = (summary: GraphSummary): string => {
-  const out: string[] = [];
+export const formatGraph = (summary: GraphSummary, style: Style = PLAIN): string => {
+  const out: Line[] = [];
+  const heading = (text: string): Line => [[['bold', 'cyan'], text]];
   const s = summary.stats;
-  out.push(`byakugan · ${summary.framework} · ${summary.entries.length} entries`);
+  out.push([['bold', 'byakugan'], ` · ${summary.framework} · ${summary.entries.length} entries`]);
   out.push(
     `${s.projectFiles} project files · ${s.packageFiles} files in ${s.packages} packages · ${s.liveFragments} live fragments`
   );
-  out.push(`fingerprint ${summary.fingerprint}`, '');
+  out.push([['dim', 'fingerprint '], summary.fingerprint], '');
 
-  out.push('entries');
+  out.push(heading('entries'));
   for (const e of summary.entries) out.push(`  ${e}`);
 
   const width = Math.min(60, Math.max(20, ...summary.files.map(f => f.key.length + 4)));
-  out.push('', 'project files');
+  out.push('', heading('project files'));
   for (const f of summary.files) {
     let what: string;
     if (f.kind === 'opaque') what = `whole file (${f.reason})`;
@@ -158,34 +165,35 @@ export const formatGraph = (summary: GraphSummary): string => {
       what = `${list(f.used)}${note ? `  (${note})` : ''}`;
     }
     else what = f.live.length > 0 ? 'runs (side effects only)' : `runs, nothing used${f.exports > 0 ? ` (0 of ${f.exports} exports)` : ''}`;
-    out.push(`  ${pad(f.key, width)}${what}`);
+    out.push([`  ${pad(f.key, width)}`, [f.used.length === 0 && f.kind !== 'opaque' ? 'yellow' : 'dim', what]]);
   }
 
   if (summary.packages.length > 0) {
-    out.push('', 'packages');
+    out.push('', heading('packages'));
     const nameWidth = Math.min(40, Math.max(...summary.packages.map(p => p.name.length + p.version.length + 5)));
     for (const p of summary.packages) {
       const files = `${p.files.length} file${p.files.length === 1 ? '' : 's'}`;
       const imports = p.imports.filter(i => i !== '*');
-      out.push(`  ${pad(`${p.name}@${p.version}`, nameWidth)}${pad(files, 11)}${list(imports)}`);
+      out.push([`  ${pad(`${p.name}@${p.version}`, nameWidth)}`, ['dim', `${pad(files, 11)}${list(imports)}`]]);
     }
   }
 
-  if (summary.tracked.length > 0) out.push('', `tracked by version  ${summary.tracked.join(', ')}`);
-  if (summary.inputs.length > 0) out.push('', `inputs  ${list(summary.inputs, 8)}`);
+  if (summary.tracked.length > 0) out.push('', [[['bold', 'cyan'], 'tracked by version'], `  ${summary.tracked.join(', ')}`]);
+  if (summary.inputs.length > 0) out.push('', [[['bold', 'cyan'], 'inputs'], `  ${list(summary.inputs, 8)}`]);
   if (summary.env.read.length > 0) {
-    out.push('', `env read  ${list(summary.env.read, 8)}`);
-    out.push(`env values counted  ${summary.env.counted.length > 0 ? list(summary.env.counted, 8) : 'none (list them under "env" in byakugan.json)'}`);
+    out.push('', [[['bold', 'cyan'], 'env read'], `  ${list(summary.env.read, 8)}`]);
+    out.push([[['bold', 'cyan'], 'env values counted'], `  ${summary.env.counted.length > 0 ? list(summary.env.counted, 8) : 'none (list them under "env" in byakugan.json)'}`]);
   }
   if (summary.unresolved.length > 0) {
-    out.push('', 'unresolved');
+    out.push('', [[['bold', 'yellow'], 'unresolved']]);
     for (const u of summary.unresolved) out.push(`  ${u.specifier}  (from ${u.from})`);
   }
   if (summary.warnings.length > 0) {
-    out.push('', 'warnings');
-    for (const w of summary.warnings) out.push(`  ${w}`);
+    out.push('', [[['bold', 'yellow'], 'warnings']]);
+    for (const w of summary.warnings) out.push([['yellow', `  ${w}`]]);
+    out.push('', [['dim', 'Run "byakugan doctor" for what each warning costs and how to fix it.']]);
   }
-  return lines(out);
+  return lines(out, style);
 };
 
 /** One line per graph node: `app/page.tsx (entry)`, `lib/utils.ts#cn`, `npm:lodash/partition.js (runs)`. */
@@ -295,35 +303,37 @@ export const formatDot = (graph: UsageGraph): string => {
   return out.join('\n');
 };
 
-export const formatAffected = (graph: UsageGraph, result: AffectedResult, verbose = false): string => {
-  const out: string[] = [];
+export const formatAffected = (graph: UsageGraph, result: AffectedResult, verbose = false, style: Style = PLAIN): string => {
+  const out: Line[] = [];
+  const yes: Line = style.on ? [[['bold', 'yellow'], '● affected']] : ['affected'];
+  const no: Line = style.on ? [[['bold', 'green'], '✔ unaffected']] : ['unaffected'];
   const base = result.base ? ` since ${result.base.slice(0, 12)}` : ' since the base manifest';
   const n = result.reasons.length;
-  if (result.affected) out.push(`affected${base}: ${n} change${n === 1 ? ' reaches' : 's reach'} the app`);
+  if (result.affected) out.push([...yes, `${base}: ${n} change${n === 1 ? ' reaches' : 's reach'} the app`]);
   else if (result.base) {
     const files = result.ignored.length;
-    out.push(`unaffected${base}: ${files} changed file${files === 1 ? '' : 's'}, none of it reaches the app`);
-  } else out.push(`unaffected${base}: every used fragment matches`);
-  out.push(`fingerprint ${result.fingerprint}`);
+    out.push([...no, `${base}: ${files} changed file${files === 1 ? '' : 's'}, none of it reaches the app`]);
+  } else out.push([...no, `${base}: every used fragment matches`]);
+  out.push([['dim', 'fingerprint '], result.fingerprint]);
   const shown = verbose ? result.reasons : result.reasons.slice(0, 20);
   for (const r of shown) {
-    out.push('', `${r.kind}: ${r.key} ${r.detail}`);
+    out.push('', [['bold', `${r.kind}:`], ` ${r.key} ${r.detail}`]);
     // A loop, not a spread: chains can be hundreds of thousands of steps long.
-    if (r.chain.length > 0) for (const line of formatChain(graph, r.chain, '    ')) out.push(line);
+    if (r.chain.length > 0) for (const line of formatChain(graph, r.chain, '    ')) out.push([['dim', line]]);
   }
   if (shown.length < result.reasons.length) out.push('', `… ${result.reasons.length - shown.length} more (use --verbose)`);
   if (result.ignored.length > 0) {
-    out.push('', 'changes nothing uses');
+    out.push('', [[['bold', 'cyan'], 'changes nothing uses']]);
     for (const i of verbose ? result.ignored : result.ignored.slice(0, 20)) {
-      out.push(`  ${i.path}${i.fragments.length > 0 ? `  (${list(i.fragments, 4)})` : ''}`);
+      out.push([`  ${i.path}`, ['dim', i.fragments.length > 0 ? `  (${list(i.fragments, 4)})` : '']]);
     }
-    if (!verbose && result.ignored.length > 20) out.push(`  … ${result.ignored.length - 20} more`);
+    if (!verbose && result.ignored.length > 20) out.push(`  … ${result.ignored.length - 20} more (use --verbose)`);
   }
   if (result.warnings.length > 0) {
-    out.push('', 'warnings');
-    for (const w of result.warnings) out.push(`  ${w}`);
+    out.push('', [[['bold', 'yellow'], 'warnings']]);
+    for (const w of result.warnings) out.push([['yellow', `  ${w}`]]);
   }
-  return lines(out);
+  return lines(out, style);
 };
 
 export interface WhyMatch {
@@ -367,17 +377,17 @@ export const why = (graph: UsageGraph, query: string, cwd = process.cwd(), limit
   return { query, matches, loaded };
 };
 
-export const formatWhy = (graph: UsageGraph, result: WhyResult): string => {
+export const formatWhy = (graph: UsageGraph, result: WhyResult, style: Style = PLAIN): string => {
   if (result.matches.length === 0) {
     return lines([
       result.loaded ? `${result.query}: loaded (for example through a barrel), but none of its code is used` : `${result.query}: not used by the app`,
     ]);
   }
-  const out: string[] = [];
+  const out: Line[] = [];
   for (const m of result.matches) {
     if (out.length > 0) out.push('');
-    out.push(`${m.key}`);
-    for (const line of formatChain(graph, m.chain, '  ')) out.push(line);
+    out.push([['bold', m.key]]);
+    for (const line of formatChain(graph, m.chain, '  ')) out.push([['dim', line]]);
   }
-  return lines(out);
+  return lines(out, style);
 };

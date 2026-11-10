@@ -231,3 +231,165 @@ describe('cli --each with a manifest', () => {
     assert.match(stderr, /has no per-file fingerprints/);
   });
 });
+
+describe('cli help', () => {
+  test('--help lists every command and where to start', () => {
+    const { code, stdout } = run(['--help']);
+    assert.equal(code, 0);
+    for (const name of ['doctor', 'affected', 'hash', 'why', 'graph', 'compare', 'guide']) assert.match(stdout, new RegExp(`^  ${name}\\s+\\S`, 'm'));
+    assert.match(stdout, /byakugan <command> --help/);
+  });
+
+  test('a command has its own help, as "<command> --help" and "help <command>"', () => {
+    const flag = run(['affected', '--help']);
+    assert.equal(flag.code, 0);
+    assert.match(flag.stdout, /--base-manifest <file>/);
+    assert.match(flag.stdout, /Exit codes\n {2}0 /);
+    assert.match(flag.stdout, /^JSON$/m);
+    assert.doesNotMatch(flag.stdout, /--maps/);
+    assert.equal(run(['help', 'affected']).stdout, flag.stdout);
+    assert.match(run(['compare', '--help']).stdout, /--maps/);
+  });
+
+  test('guide prints the adoption guide', () => {
+    const { code, stdout } = run(['guide']);
+    assert.equal(code, 0);
+    assert.match(stdout, /byakugan doctor/);
+  });
+});
+
+describe('cli errors', () => {
+  test('a mistyped command gets a suggestion', () => {
+    const { code, stderr } = run(['affcted']);
+    assert.equal(code, 2);
+    assert.match(stderr, /Unknown command "affcted"/);
+    assert.match(stderr, /Did you mean "affected"\?/);
+  });
+
+  test('a mistyped option gets a suggestion and the command to ask for help', () => {
+    const { code, stderr } = run(['affected', '--bse', 'main']);
+    assert.equal(code, 2);
+    assert.match(stderr, /Unknown option --bse/);
+    assert.match(stderr, /Did you mean --base\?/);
+    assert.match(stderr, /help: byakugan affected --help/);
+  });
+
+  test('an option that belongs to another command is named', () => {
+    const { code, stderr } = run(['graph', '--maps', '-C', fixture('basic')]);
+    assert.equal(code, 2);
+    assert.match(stderr, /--maps does not work with graph/);
+    assert.match(stderr, /It works with: compare/);
+  });
+
+  test('an option without its value says what the value is', () => {
+    const { code, stderr } = run(['affected', '--base']);
+    assert.equal(code, 2);
+    assert.match(stderr, /--base needs a value/);
+  });
+
+  test('a base that git does not know comes with the fetch hint', () => {
+    const dir = fixture('basic');
+    initRepo(dir);
+    const { code, stderr } = run(['affected', '--base', 'origin/nope', '-C', dir]);
+    assert.equal(code, 2);
+    assert.match(stderr, /"origin\/nope" is not a commit in this clone/);
+    assert.match(stderr, /fetch-depth: 0/);
+  });
+
+  test('with --json an error is one JSON object on stderr and nothing on stdout', () => {
+    const { code, stdout, stderr } = run(['affected', '--json', '-C', fixture('basic')]);
+    assert.equal(code, 2);
+    assert.equal(stdout, '');
+    const { error } = JSON.parse(stderr);
+    assert.match(error.message, /needs exactly one of/);
+    assert.match(error.hint, /--base origin\/main/);
+    assert.equal(error.help, 'byakugan affected --help');
+  });
+
+  test('a missing manifest says how to write one', () => {
+    const { code, stderr } = run(['affected', '--base-manifest', 'nowhere.json', '-C', fixture('basic')]);
+    assert.equal(code, 2);
+    assert.match(stderr, /byakugan hash --manifest <file>/);
+  });
+});
+
+describe('cli colors', () => {
+  const ESC = String.fromCharCode(27);
+
+  test('output has no escape sequences by default, and FORCE_COLOR adds them', () => {
+    const dir = fixture('basic');
+    assert.ok(!run(['graph', '-C', dir]).stdout.includes(ESC));
+    assert.ok(run(['graph', '-C', dir], { FORCE_COLOR: '1' }).stdout.includes(`${ESC}[1m`));
+    assert.ok(!run(['graph', '-C', dir], { FORCE_COLOR: '1', NO_COLOR: '1' }).stdout.includes(ESC));
+  });
+
+  test('with color on, the words stay the same', () => {
+    const dir = fixture('basic');
+    const strip = (text: string) => text.replaceAll(new RegExp(`${ESC}\\[\\d+m`, 'g'), '');
+    assert.equal(strip(run(['graph', '-C', dir], { FORCE_COLOR: '1' }).stdout), run(['graph', '-C', dir]).stdout);
+  });
+
+  test('with color on, an escape sequence in a file name is still escaped', () => {
+    const dir = fixture('basic');
+    write(dir, `src/${ESC}[31mred.ts`, 'export const red = 1;\n');
+    edit(dir, 'src/main.tsx', s => `import { red } from './${ESC}[31mred';\nconsole.log(red);\n${s}`);
+    const { stdout } = run(['graph', '-C', dir], { FORCE_COLOR: '1' });
+    assert.match(stdout, /\\u001b\[31mred\.ts/);
+    assert.ok(!stdout.includes(`${ESC}[31m`));
+  });
+});
+
+describe('cli doctor', () => {
+  test('a clean app passes and names the next command', () => {
+    const { code, stdout } = run(['doctor', '-C', fixture('basic')]);
+    assert.equal(code, 0, stdout);
+    assert.match(stdout, /no problems found/);
+    assert.match(stdout, /byakugan affected --base origin\/main/);
+  });
+
+  test('an import that cannot be resolved blocks, with the fix, and exits with 1', () => {
+    const dir = fixture('basic');
+    edit(dir, 'src/main.tsx', s => `import '@alias/missing';\nimport './gone';\n${s}`);
+    const { code, stdout } = run(['doctor', '-C', dir]);
+    assert.equal(code, 1);
+    assert.match(stdout, /^blocks\s+2 imports of project code cannot be resolved/m);
+    assert.match(stdout, /tsconfig\s+"paths"/);
+    assert.match(stdout, /- src\/main\.tsx: cannot resolve "\.\/gone"/);
+  });
+
+  test('--json lists findings by severity and kind', () => {
+    const dir = fixture('basic');
+    edit(dir, 'src/main.tsx', s => `import './gone';\n${s}`);
+    const result = JSON.parse(run(['doctor', '--json', '-C', dir]).stdout);
+    assert.equal(result.ok, false);
+    const [finding] = result.apps[0].findings;
+    assert.deepEqual([finding.severity, finding.kind, finding.count], ['blocks', 'unresolved-import', 1]);
+    assert.ok(finding.fix && finding.cost);
+  });
+
+  test('a computed import can hide a change', () => {
+    const dir = fixture('basic');
+    edit(dir, 'src/main.tsx', s => `${s}\nexport const load = (name: string) => import(name);\n`);
+    const { code, stdout } = run(['doctor', '-C', dir]);
+    assert.equal(code, 1);
+    assert.match(stdout, /^hides\s+1 computed import cannot be followed/m);
+  });
+
+  test('no entries is a finding, not a crash', () => {
+    const dir = fixture('basic');
+    write(dir, 'byakugan.json', '{ "framework": "none", "entry": ["missing/*.ts"] }');
+    const result = JSON.parse(run(['doctor', '--json', '-C', dir]).stdout);
+    assert.ok(result.apps[0].findings.some((f: { kind: string }) => f.kind === 'no-entries'));
+  });
+
+  test('--workspace prints one row per app and details for the ones with problems', () => {
+    const dir = fixture('monorepo');
+    write(dir, 'apps/docs/package.json', JSON.stringify({ name: 'docs', private: true, type: 'module' }));
+    write(dir, 'apps/docs/src/index.ts', "import './gone';\nexport const title = 'docs';\n");
+    const { code, stdout } = run(['doctor', '--workspace', '-C', dir]);
+    assert.equal(code, 1);
+    assert.match(stdout, /^apps\/docs\s+none\s+1\s+1\s+1\s+0\s+0$/m);
+    assert.match(stdout, /^apps\/web\s+next\s/m);
+    assert.match(stdout, /^apps\/docs\nblocks/m);
+  });
+});

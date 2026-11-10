@@ -7,45 +7,32 @@ import { UsageGraph, type ModuleCache } from './graph.ts';
 import { isConfigEntry, loadProject } from './project.ts';
 import { describeNode, formatAffected, formatDot, formatGraph, formatMermaid, formatWhy, safe, summarize, why } from './report.ts';
 import { eachFingerprints, eachProject, eachSinceManifest, entriesReaching } from './select.ts';
+import { doctorOk, doctorReport, formatDoctor, type DoctorReport } from './doctor.ts';
+import { COMMAND_NAMES, COMMANDS, OPTIONS, commandHelp, findCommand, mainHelp, type OptionName } from './help.ts';
+import { closest, colorEnabled, createStyle } from './ui.ts';
 import { toolVersion } from './version.ts';
 import { workspaceApps } from './workspace.ts';
 
-const HELP = `byakugan: the graph of code your app actually uses
+/** A mistake in how byakugan was called, or a setup problem with a known fix. Exits with 2. */
+class UsageError extends Error {
+  hint?: string;
+  /** The command whose --help covers this. */
+  command?: string;
+  constructor(message: string, hint?: string, command?: string) {
+    super(message);
+    this.hint = hint;
+    this.command = command;
+  }
+}
 
-Usage
-  byakugan [graph]           Print used files, exports and package files (default)
-  byakugan hash              Print a fingerprint of everything the app uses
-  byakugan affected          Do changes since --base (or a saved manifest) reach the app?
-  byakugan why <target>      Show the import chain that makes a file, export or package used
-  byakugan compare <base> <fresh>
-                             Compare two build outputs (e.g. .next) without per-build noise
+const out = createStyle(colorEnabled(process.stdout));
+const err = createStyle(colorEnabled(process.stderr));
 
-Options
-  -C, --cwd <dir>            Project directory (default: current directory)
-      --json                 JSON output
-      --mermaid, --dot       Graph as Mermaid or Graphviz (graph)
-      --manifest <file>      Also write per-fragment hashes to <file> (hash)
-      --base <ref>           Compare with the merge base of <ref> and HEAD (affected)
-      --base-manifest <file> Compare with a manifest from the base build (affected)
-      --exit-code            Exit with 1 when affected, 0 when not (affected)
-      --verbose              List every reason and ignored change (affected)
-      --each <glob>          One verdict per matching file, e.g. per test (affected).
-                             Prints the files a change reaches, one per line.
-                             With hash --manifest, saves one fingerprint per file.
-      --maps                 Compare source maps too (compare)
-      --strict               Promise the same build output, not only the same behavior:
-                             also count code the bundler ships but nothing runs.
-                             Same as "mode": "strict" in byakugan.json.
-      --workspace            Run hash or affected for every app in the workspace at -C.
-                             --manifest and --base-manifest then name directories.
-  -h, --help
-  -v, --version
-
-Targets for why: src/lib/utils.ts, src/lib/utils.ts#formatDate, lodash, npm:lodash/partition.js
-
-In GitHub Actions, hash and affected also write fingerprint= and affected= to $GITHUB_OUTPUT,
-and affected writes a summary to $GITHUB_STEP_SUMMARY. With --workspace they write apps=,
-a JSON list of the affected app directories, and fingerprints=, a JSON object.`;
+/** A line on stderr that the next one overwrites. Only on a terminal, so logs stay clean. */
+const progress = (text: string) => {
+  if (!process.stderr.isTTY || !err.on) return;
+  process.stderr.write(text ? `\r\u001b[2K${err.dim(safe(text))}` : '\r\u001b[2K');
+};
 
 const version = toolVersion;
 
@@ -85,15 +72,42 @@ interface Values {
   'exit-code'?: boolean;
   verbose?: boolean;
   strict?: boolean;
+  cwd?: string;
 }
 
-/** `--workspace`: one verdict per app. An app that fails to build a graph counts as affected. */
+const messageOf = (error: unknown) => String((error as Error).message ?? error);
+
+/** `--workspace`: one result per app. An app that fails to build a graph counts as affected. */
 const workspaceMain = (command: string, root: string, values: Values): number => {
   const apps = workspaceApps(root, values.strict ? { mode: 'strict' } : undefined);
+  if (apps.length === 0) {
+    throw new UsageError(
+      `No apps found in the workspace at ${root}`,
+      'A package is an app when byakugan detects a framework in it, or when it has a byakugan.json with "entry" globs. Add one to each package you want a verdict for.',
+      command
+    );
+  }
   // Apps share packages, so each file is parsed once for the whole run.
   const cache: ModuleCache = new Map();
+  if (command === 'doctor') {
+    const reports: DoctorReport[] = [];
+    apps.forEach(({ path, project, error }, i) => {
+      progress(`byakugan: ${path} (${i + 1} of ${apps.length})`);
+      try {
+        if (!project) throw new Error(error);
+        reports.push(doctorReport(path, new UsageGraph(project, undefined, cache).build()));
+      } catch (e) {
+        reports.push({ app: path, framework: '', entries: 0, projectFiles: 0, packageFiles: 0, fingerprint: '', error: messageOf(e), findings: [] });
+      }
+    });
+    progress('');
+    const ok = doctorOk(reports);
+    console.log(values.json ? JSON.stringify({ ok, apps: reports }, null, 2) : formatDoctor(reports, out, { verbose: values.verbose, workspace: true, cwd: values.cwd }));
+    return ok ? 0 : 1;
+  }
   const results: Array<{ app: string; affected: boolean; fingerprint: string; reason: string; error?: string; warnings: string[] }> = [];
-  for (const { path, project, error } of apps) {
+  apps.forEach(({ path, project, error }, i) => {
+    progress(`byakugan: ${path} (${i + 1} of ${apps.length})`);
     try {
       if (!project) throw new Error(error);
       const graph = new UsageGraph(project, undefined, cache).build();
@@ -103,26 +117,30 @@ const workspaceMain = (command: string, root: string, values: Values): number =>
           writeFileSync(manifestFile(values.manifest, path), `${JSON.stringify(createManifest(graph), null, 2)}\n`);
         }
         results.push({ app: path, affected: true, fingerprint: graph.fingerprint(), reason: '', warnings: graph.warnings });
-        continue;
+        return;
       }
       const result = values['base-manifest']
         ? affectedSinceManifest(graph, readManifest(manifestFile(values['base-manifest'], path)))
         : affectedSinceCommit(graph, values.base as string);
       results.push({ app: path, affected: result.affected, fingerprint: result.fingerprint, reason: firstReason(result), warnings: result.warnings });
-      if (values.verbose && !values.json) console.log(`${safe(path)}\n${formatAffected(graph, result, true)}\n`);
-    } catch (error) {
-      const message = String((error as Error).message ?? error);
+      if (values.verbose && !values.json) {
+        progress('');
+        console.log(`${out.paint(['bold', 'cyan'], safe(path))}\n${formatAffected(graph, result, true, out)}\n`);
+      }
+    } catch (e) {
+      const message = messageOf(e);
       results.push({ app: path, affected: true, fingerprint: '', reason: `error: ${message}`, error: message, warnings: [] });
     }
-  }
+  });
+  progress('');
   const fingerprints = Object.fromEntries(results.map(r => [r.app, r.fingerprint]));
+  const width = Math.max(...results.map(r => r.app.length)) + 2;
   if (command === 'hash') {
     githubOutput({ fingerprints: JSON.stringify(fingerprints) });
     if (values.json) console.log(JSON.stringify({ apps: results.map(r => ({ app: r.app, fingerprint: r.fingerprint, error: r.error, warnings: r.warnings })) }, null, 2));
     else {
       for (const r of results) warn(r.warnings.map(w => `${r.app}: ${w}`));
-      const width = Math.max(...results.map(r => r.app.length)) + 2;
-      for (const r of results) console.log(safe(`${r.app.padEnd(width)}${r.fingerprint || r.reason}`));
+      for (const r of results) console.log(`${safe(r.app.padEnd(width))}${r.fingerprint || out.red(safe(r.reason))}`);
     }
     return results.some(r => r.error) ? 2 : 0;
   }
@@ -130,100 +148,176 @@ const workspaceMain = (command: string, root: string, values: Values): number =>
   githubOutput({ affected: String(affectedApps.length > 0), apps: JSON.stringify(affectedApps), fingerprints: JSON.stringify(fingerprints) });
   stepSummary(results.map(r => ({ app: r.app, affected: r.affected, reason: r.reason })));
   if (values.json) console.log(JSON.stringify({ affected: affectedApps, apps: results }, null, 2));
-  else if (!values.verbose) {
-    const width = Math.max(...results.map(r => r.app.length)) + 2;
-    for (const r of results) console.log(safe(`${r.app.padEnd(width)}${(r.affected ? 'affected' : 'unaffected').padEnd(12)}${r.reason}`.trimEnd()));
+  else {
+    if (!values.verbose) {
+      for (const r of results) {
+        const status = (r.affected ? 'affected' : 'unaffected').padEnd(12);
+        const painted = r.error ? out.red(status) : r.affected ? out.yellow(status) : out.green(status);
+        console.log(`${safe(r.app.padEnd(width))}${painted}${out.dim(safe(r.reason.replace(/[\r\n]+/g, ' ')))}`.trimEnd());
+      }
+    }
+    const warned = results.filter(r => r.warnings.length > 0).length;
+    console.error(
+      err.dim(`byakugan: ${affectedApps.length} of ${results.length} apps affected${warned > 0 ? `, ${warned} with warnings (see "byakugan doctor --workspace")` : ''}`)
+    );
   }
   return values['exit-code'] && affectedApps.length > 0 ? 1 : 0;
 };
 
 /** Warnings go to stderr, so stdout stays a fingerprint or JSON that scripts can read. */
 const warn = (warnings: string[]) => {
-  for (const w of warnings) console.error(`byakugan: warning: ${safe(w.replace(/[\r\n]/g, ' '))}`);
+  for (const w of warnings) console.error(`byakugan: ${err.yellow('warning:')} ${safe(w.replace(/[\r\n]/g, ' '))}`);
+};
+
+const PARSE_OPTIONS = {
+  cwd: { type: 'string', short: 'C' },
+  json: { type: 'boolean' },
+  mermaid: { type: 'boolean' },
+  dot: { type: 'boolean' },
+  manifest: { type: 'string' },
+  base: { type: 'string' },
+  'base-manifest': { type: 'string' },
+  'exit-code': { type: 'boolean' },
+  verbose: { type: 'boolean' },
+  workspace: { type: 'boolean' },
+  strict: { type: 'boolean' },
+  each: { type: 'string', multiple: true },
+  maps: { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' },
+  version: { type: 'boolean', short: 'v' },
+} as const;
+
+const FLAGS = Object.keys(PARSE_OPTIONS).map(name => `--${name}`);
+
+/** The first argument that is not an option or an option's value: the command, when one was given. */
+const commandIn = (argv: string[]): string | undefined => {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg.startsWith('-')) return arg;
+    const name = arg === '-C' ? 'cwd' : arg.replace(/^--/, '');
+    if (!arg.includes('=') && (PARSE_OPTIONS as Record<string, { type: string }>)[name]?.type === 'string') i++;
+  }
+  return undefined;
+};
+
+const parse = (argv: string[]) => {
+  try {
+    return parseArgs({ args: argv, allowPositionals: true, options: PARSE_OPTIONS });
+  } catch (error) {
+    const command = findCommand(commandIn(argv) ?? '')?.name;
+    const code = (error as { code?: string }).code;
+    const unknown = /Unknown option '([^']+)'/.exec(messageOf(error))?.[1];
+    if (code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION' && unknown) {
+      const flag = unknown.split('=')[0];
+      const near = closest(flag, FLAGS);
+      throw new UsageError(`Unknown option ${flag}`, near ? `Did you mean ${near}?` : undefined, command ?? '');
+    }
+    const missing = /Option '(?:-\w, )?(--[\w-]+)[^']*' argument missing/.exec(messageOf(error))?.[1];
+    if (missing) {
+      const name = missing.slice(2) as OptionName;
+      throw new UsageError(`${missing} needs a value`, OPTIONS[name] ? `${OPTIONS[name].flag}: ${OPTIONS[name].text}` : undefined, command ?? '');
+    }
+    throw new UsageError(messageOf(error), undefined, command ?? '');
+  }
+};
+
+/** Hints for failures deeper in the tool, matched by their message. */
+const hintFor = (message: string, values: Values): string | undefined => {
+  if (/is not inside a git repository/.test(message)) return 'affected --base reads the base side from git. Without git, save a manifest with "byakugan hash --manifest <file>" and compare with --base-manifest.';
+  if (/is not a byakugan manifest/.test(message)) return 'Write a manifest with: byakugan hash --manifest <file>';
+  if (/ENOENT/.test(message) && values['base-manifest']) return 'No manifest at that path. Save one on the base commit with "byakugan hash --manifest <file>". In CI, fall back to --base <ref> when the cache has none.';
+  if (/ENOENT|ENOTDIR/.test(message) && values.cwd) return `Check the directory passed to -C (${values.cwd}).`;
+  if (/is not valid JSON|must be a list of strings|must be one of|must hold a JSON object|must be a string|must be an object/.test(message)) return 'docs/configuration.md lists every byakugan.json field. "byakugan guide" shows common setups.';
+  if (/is not a commit in this clone/.test(message)) return 'Fetch the base first (git fetch origin main) and name it as origin/main. In GitHub Actions set fetch-depth: 0 on actions/checkout.';
+  return undefined;
+};
+
+const guideText = (): string => {
+  try {
+    return readFileSync(new URL('../docs/adopting.md', import.meta.url), 'utf8');
+  } catch {
+    return 'The guide is at https://github.com/IShotTheSheriff/byakugan/blob/main/docs/adopting.md\n';
+  }
 };
 
 const main = (argv: string[]): number => {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    allowPositionals: true,
-    options: {
-      cwd: { type: 'string', short: 'C' },
-      json: { type: 'boolean' },
-      mermaid: { type: 'boolean' },
-      dot: { type: 'boolean' },
-      manifest: { type: 'string' },
-      base: { type: 'string' },
-      'base-manifest': { type: 'string' },
-      'exit-code': { type: 'boolean' },
-      verbose: { type: 'boolean' },
-      workspace: { type: 'boolean' },
-      strict: { type: 'boolean' },
-      each: { type: 'string', multiple: true },
-      maps: { type: 'boolean' },
-      help: { type: 'boolean', short: 'h' },
-      version: { type: 'boolean', short: 'v' },
-    },
-  });
+  const { values, positionals } = parse(argv);
 
-  if (values.help) {
-    console.log(HELP);
-    return 0;
-  }
   if (values.version) {
     console.log(version());
     return 0;
   }
+  // `byakugan help affected`, `byakugan affected --help` and `byakugan --help`.
+  if (values.help || positionals[0] === 'help') {
+    const name = positionals[0] === 'help' ? positionals[1] : positionals[0];
+    const found = name ? findCommand(name) : undefined;
+    if (name && !found) {
+      const near = closest(name, COMMAND_NAMES);
+      throw new UsageError(`Unknown command "${name}"`, near ? `Did you mean "${near}"?` : `Commands: ${COMMAND_NAMES.join(', ')}`, '');
+    }
+    console.log(found ? commandHelp(found, out) : mainHelp(out, version()));
+    return 0;
+  }
 
   const [command = 'graph', target] = positionals;
+  const spec = findCommand(command);
+  if (!spec) {
+    const near = closest(command, COMMAND_NAMES);
+    throw new UsageError(`Unknown command "${command}"`, near ? `Did you mean "${near}"?` : `Commands: ${COMMAND_NAMES.join(', ')}`, '');
+  }
+  for (const name of Object.keys(values) as OptionName[]) {
+    if (spec.options.includes(name)) continue;
+    const users = COMMANDS.filter(c => c.options.includes(name)).map(c => c.name);
+    throw new UsageError(`--${name} does not work with ${command}`, `It works with: ${users.join(', ')}`, command);
+  }
+
+  if (command === 'guide') {
+    process.stdout.write(guideText());
+    return 0;
+  }
   if (command === 'compare') {
     const [, base, fresh] = positionals;
-    if (!base || !fresh) {
-      console.error('Usage: byakugan compare <base build dir> <fresh build dir>');
-      return 2;
-    }
+    if (!base || !fresh) throw new UsageError('compare needs two build directories', 'byakugan compare <base build dir> <fresh build dir>', command);
     const differences = compareBuilds(base, fresh, { maps: values.maps });
     if (values.json) console.log(JSON.stringify({ same: differences.length === 0, differences }, null, 2));
-    else if (differences.length === 0) console.log('The builds match.');
+    else if (differences.length === 0) console.log(out.green(`${out.on ? '✔ ' : ''}The builds match.`));
     else console.log(safe(`The builds differ in ${differences.length} file${differences.length === 1 ? '' : 's'}:\n\n${differences.map(d => `${d.path}: ${d.detail}`).join('\n\n')}`));
     return differences.length === 0 ? 0 : 1;
   }
-  if (!['graph', 'hash', 'affected', 'why'].includes(command)) {
-    console.error(`Unknown command "${command}"\n\n${HELP}`);
-    return 2;
-  }
   if (command === 'why' && !target) {
-    console.error('Usage: byakugan why <file | file#export | package>');
-    return 2;
+    throw new UsageError('why needs a target', 'A file (src/lib/utils.ts), an export (src/lib/utils.ts#formatDate), a package (lodash) or a package file (npm:lodash/partition.js)', command);
   }
   if (command === 'affected' && !values.base === !values['base-manifest']) {
-    console.error('affected needs exactly one of --base <ref> or --base-manifest <file>');
-    return 2;
+    throw new UsageError(
+      values.base ? 'affected takes --base or --base-manifest, not both' : 'affected needs exactly one of --base <ref> or --base-manifest <file>',
+      'Use --base origin/main to compare with git, or --base-manifest <file> to compare with a manifest that "byakugan hash --manifest" saved.',
+      command
+    );
   }
-
-  if (values.each && ((command !== 'affected' && command !== 'hash') || values.workspace)) {
-    console.error('--each works with affected and hash, without --workspace');
-    return 2;
-  }
-  if (values.workspace) {
-    if (command !== 'hash' && command !== 'affected') {
-      console.error('--workspace works with hash and affected');
-      return 2;
-    }
-    return workspaceMain(command, realpathSync(resolve(values.cwd ?? process.cwd())), values);
-  }
+  if (values.each && values.workspace) throw new UsageError('--each does not work with --workspace', 'Run it once per app: byakugan affected -C <app> --each <glob> --base <ref>', command);
+  if (values.workspace) return workspaceMain(command, realpathSync(resolve(values.cwd ?? process.cwd())), values);
 
   const loaded = loadProject({ cwd: values.cwd, config: values.strict ? { mode: 'strict' } : undefined });
   const selection = values.each ? eachProject(loaded, values.each) : undefined;
   const project = selection?.project ?? loaded;
   if (selection && selection.each.length === 0) {
-    console.error(`No files in ${safe(loaded.dir)} match ${safe(values.each?.join(', ') ?? '')}`);
-    return 2;
+    throw new UsageError(`No files in ${loaded.dir} match ${values.each?.join(', ') ?? ''}`, '--each globs are relative to the app directory (-C). Quote them, so the shell does not expand them.', command);
+  }
+  if (command === 'doctor') {
+    const graph = new UsageGraph(project).build();
+    const report = doctorReport(graph.fileKey(project.dir) || '.', graph);
+    const ok = doctorOk([report]);
+    console.log(values.json ? JSON.stringify({ ok, apps: [report] }, null, 2) : formatDoctor([report], out, { verbose: values.verbose, cwd: values.cwd }));
+    return ok ? 0 : 1;
   }
   // Only config files (vite.config.ts, next.config.js) means the app's own entries were not found:
   // a fingerprint of the config alone would miss every source change.
   if (project.entries.every(isConfigEntry)) {
-    console.error(`No entry files found in ${safe(project.dir)}. Add "entry" globs to byakugan.json.`);
-    return 2;
+    throw new UsageError(
+      `No entry files found in ${project.dir}. Add "entry" globs to byakugan.json.`,
+      'byakugan found no framework routes and no index, main, server or app file. Put { "entry": ["src/main.ts"] } in byakugan.json next to package.json, or pass -C <app dir>. In a monorepo, "byakugan doctor --workspace" lists the apps.',
+      command
+    );
   }
   const graph = new UsageGraph(project).build();
 
@@ -231,7 +325,7 @@ const main = (argv: string[]): number => {
     if (values.mermaid) console.log(formatMermaid(graph));
     else if (values.dot) console.log(formatDot(graph));
     else if (values.json) console.log(JSON.stringify(summarize(graph), null, 2));
-    else console.log(formatGraph(summarize(graph)));
+    else console.log(formatGraph(summarize(graph), out));
     return 0;
   }
 
@@ -257,15 +351,14 @@ const main = (argv: string[]): number => {
     if (values.json) console.log(JSON.stringify({ ...result, matches: readableChains(graph, result.matches), warnings: graph.warnings }, null, 2));
     else {
       warn(graph.warnings);
-      console.log(formatWhy(graph, result));
+      console.log(formatWhy(graph, result, out));
     }
     return 0;
   }
 
   const baseManifest = values['base-manifest'] ? readManifest(values['base-manifest']) : undefined;
   if (selection && baseManifest && !baseManifest.each) {
-    console.error(`${safe(values['base-manifest'] ?? '')} has no per-file fingerprints. Write it with: byakugan hash --each <the same globs> --manifest <file>`);
-    return 2;
+    throw new UsageError(`${values['base-manifest'] ?? ''} has no per-file fingerprints`, 'Write it with the same globs: byakugan hash --each <glob> --manifest <file>', command);
   }
   const result = baseManifest ? affectedSinceManifest(graph, baseManifest) : affectedSinceCommit(graph, values.base as string);
   if (selection) {
@@ -282,14 +375,27 @@ const main = (argv: string[]): number => {
   }
   githubOutput({ affected: String(result.affected), fingerprint: result.fingerprint });
   stepSummary([{ app: graph.fileKey(project.dir) || '.', affected: result.affected, reason: firstReason(result) }]);
-  console.log(values.json ? JSON.stringify({ ...result, reasons: readableChains(graph, result.reasons) }, null, 2) : formatAffected(graph, result, values.verbose));
+  console.log(values.json ? JSON.stringify({ ...result, reasons: readableChains(graph, result.reasons) }, null, 2) : formatAffected(graph, result, values.verbose, out));
   return values['exit-code'] && result.affected ? 1 : 0;
 };
 
+const argv = process.argv.slice(2);
 try {
-  process.exitCode = main(process.argv.slice(2));
+  process.exitCode = main(argv);
 } catch (error) {
+  progress('');
   // Messages can quote repository content (a JSON parse error shows the bad text).
-  console.error(`byakugan: ${safe(String((error as Error).message ?? error).replace(/[\r\n]+/g, ' '))}`);
+  const message = safe(messageOf(error).replace(/[\r\n]+/g, ' '));
+  const usage = error instanceof UsageError ? error : undefined;
+  const cwdAt = argv.findIndex(a => a === '-C' || a === '--cwd');
+  const hint = usage?.hint ?? hintFor(message, { cwd: cwdAt === -1 ? undefined : argv[cwdAt + 1], 'base-manifest': argv.some(a => a.startsWith('--base-manifest')) ? 'set' : undefined });
+  const help = usage?.command === undefined ? undefined : usage.command ? `byakugan ${usage.command} --help` : 'byakugan --help';
+  if (argv.includes('--json')) {
+    console.error(JSON.stringify({ error: { message, hint: hint && safe(hint), help } }));
+  } else {
+    console.error(`byakugan: ${err.paint(['bold', 'red'], 'error:')} ${message}`);
+    if (hint) console.error(`  ${err.cyan('hint:')} ${safe(hint)}`);
+    if (help) console.error(`  ${err.cyan('help:')} ${help}`);
+  }
   process.exitCode = 2;
 }

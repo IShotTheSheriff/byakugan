@@ -1,0 +1,63 @@
+# A monorepo with apps/web, apps/api and a Playwright package in e2e/.
+# One job asks byakugan which apps a pull request reaches. The end-to-end job
+# runs when the answer names an app the suite talks to, or the suite itself.
+#
+# e2e/byakugan.json makes the test package an app, so an edited spec counts:
+#   { "framework": "none", "entry": ["tests/**/*.spec.ts", "playwright.config.ts"] }
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.pr.outputs.apps || steps.main.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # affected needs the merge base
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      # byakugan reads node_modules, so it runs after the install.
+      - run: npm ci
+
+      # A failing step fails the job, and the e2e job below then does not start.
+      # Nothing is skipped on a byakugan error.
+      - id: pr
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }} # through env, so a branch name cannot inject shell code
+        run: npx --no-install byakugan affected --workspace --base "origin/$BASE_REF"
+
+      # On main every app counts.
+      - id: main
+        if: github.event_name == 'push'
+        run: echo "apps=$(npx --no-install byakugan hash --workspace --json | jq -c '[.apps[].app]')" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: changes
+    # Every app the suite talks to, plus the test package.
+    if: >-
+      contains(fromJSON(needs.changes.outputs.apps), 'apps/web') ||
+      contains(fromJSON(needs.changes.outputs.apps), 'apps/api') ||
+      contains(fromJSON(needs.changes.outputs.apps), 'e2e')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build --workspace web --workspace api
+      - run: npm run e2e --workspace e2e

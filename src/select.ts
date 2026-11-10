@@ -6,12 +6,14 @@ import { isConfigEntry, type Project } from './project.ts';
 
 const CONFIG_EXT = '{ts,mts,cts,js,mjs,cjs}';
 
-/** Test runner configs and setup files: every test loads them, so a change there reaches them all. */
+/** Test runner and Storybook configs and setup files: every test or story loads them, so a change there reaches them all. */
 const RUNNER_FILES = [
   `{vitest,vite,jest,playwright}.config.${CONFIG_EXT}`,
   `vitest.{workspace,setup}.${CONFIG_EXT}`,
   `{jest,test}.setup.${CONFIG_EXT}`,
   `setupTests.${CONFIG_EXT}`,
+  // Storybook loads main and preview for every story: decorators, global styles, addons.
+  '.storybook/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}',
 ];
 
 export interface EachProject {

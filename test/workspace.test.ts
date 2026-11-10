@@ -37,6 +37,31 @@ describe('workspace apps', () => {
   });
 });
 
+describe('Nx projects', () => {
+  const nx = (extra: Record<string, string | object> = {}) =>
+    app({
+      'package.json': { name: 'root', private: true },
+      'nx.json': {},
+      'apps/api/project.json': { name: 'api', projectType: 'application' },
+      'apps/api/src/main.ts': "import { util } from '../../../libs/util/src/index';\nconsole.log(util);\n",
+      'libs/util/project.json': { name: 'util', projectType: 'library' },
+      'libs/util/src/index.ts': 'export const util = 1;\n',
+      ...extra,
+    });
+
+  test('a project.json with projectType application is an app, a library is not', () => {
+    assert.deepEqual(workspaceApps(nx()).map(a => a.path), ['apps/api']);
+  });
+
+  test('a library with a byakugan.json gets a verdict too', () => {
+    assert.deepEqual(workspaceApps(nx({ 'libs/util/byakugan.json': { entry: ['src/index.ts'] } })).map(a => a.path), ['apps/api', 'libs/util']);
+  });
+
+  test('without nx.json and without workspaces there is nothing to list', () => {
+    assert.throws(() => workspaceApps(app({ 'package.json': { name: 'root' }, 'apps/api/project.json': { projectType: 'application' } })), /no workspaces .* and no nx\.json/);
+  });
+});
+
 describe('workspace patterns', () => {
   test('pnpm-workspace.yaml lists in block and flow style', () => {
     assert.deepEqual(workspacePatterns(app({ 'package.json': {}, 'pnpm-workspace.yaml': "packages: ['apps/*', \"packages/*\"]\n" })), ['apps/*', 'packages/*']);

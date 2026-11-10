@@ -2,7 +2,8 @@
 
 Builds the graph of code an app uses (files, exports, single declarations,
 npm package files) and turns it into a fingerprint and an "affected" check.
-README.md explains the model and its limits; read it first.
+README.md is the overview. docs/how-it-works.md explains the model and
+docs/limits.md its limits; read both first.
 
 ## Layout
 
@@ -69,6 +70,18 @@ README.md explains the model and its limits; read it first.
   contents) and manifest mode.
 - `src/report.ts`: text, JSON, Mermaid, DOT and `why` output. The CLI prints
   chains in JSON through `describeNode`, never as raw node ids.
+- `src/cli.ts`: argument parsing and the commands. A usage mistake throws
+  `UsageError` with a `hint`, and the last lines of the file print every error
+  as `byakugan: error: …` plus `hint:` and `help:`, or as JSON with `--json`.
+- `src/help.ts`: `OPTIONS` and `COMMANDS`, the one source for `--help`, for
+  the check that an option belongs to its command, and for "did you mean".
+- `src/doctor.ts`: `byakugan doctor`. `RULES` sorts graph warnings into
+  findings by matching their text, each with a severity, a cost and a fix.
+- `src/ui.ts`: colors (`NO_COLOR`, `FORCE_COLOR`, TTY), `closest` and `wrap`.
+  Formatters in report.ts build lines from parts, and `lines()` escapes each
+  part before it paints it.
+- `docs/`: user documentation. `docs/adopting.md` ships in the npm package,
+  and `byakugan guide` prints it.
 - `src/fs.ts`: `readRegular` and `readText`, which read regular files only.
   `src/glob.ts`: `globMatcher` and `safeGlob`, linear-time matching and a
   crawler that stays inside the git root. A link into a directory the crawl
@@ -100,6 +113,12 @@ README.md explains the model and its limits; read it first.
   `project.repo` (`inside()` in graph.ts). Text output goes through `safe()`.
   oxc-resolver reads `package.json` files itself, so resolve through
   `Resolver.resolve` or `resolveStyle`, which stat them first.
+- Output keeps the same words with and without color. Paint through `Style`
+  after `safe()`, never before, and never build an escape sequence from
+  repository text. Marks such as `✔` appear only when `style.on`.
+- A new warning in graph.ts needs a rule in `RULES` (doctor.ts) and a row in
+  the table of docs/adopting.md, step 3. A new option needs an entry in
+  `OPTIONS` and in the `options` of each command that takes it.
 - The Tailwind worker builds both sides of a comparison the same way
   (`scanFiles` on contents, fresh compiler). `compiler.build` accumulates
   candidates, so never reuse a compiler across builds.
