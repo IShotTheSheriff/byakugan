@@ -45,7 +45,9 @@ The table has one row per app. byakugan counts a package as an app when one of
 these holds:
 
 - it detects a framework in it (Next.js, Vite, React Router) or a Cloudflare
-  Worker
+  Worker. A package that other packages depend on needs the framework's
+  config file too, such as `next.config.ts`. `next` in its dependencies is
+  not enough
 - its Nx `project.json` says `"projectType": "application"`
 - it has a `byakugan.json`
 - no other workspace package depends on it
@@ -82,6 +84,7 @@ Fix them in this order.
 | `hides` | `unreadable-file` | A file is missing or not a regular file | Run code generation before byakugan, as the build does |
 | `coarse` | `tailwind-failed` | Tailwind could not run, so every file it may scan counts | Check that the Tailwind config loads right after install, without build-time environment |
 | `coarse` | `missing-export` | An import names an export byakugan cannot find | Usually harmless |
+| `note` | `unresolved-type-import` | An `import type` does not resolve. Verdicts stay right, and the types behind it are not hashed | Run code generation before byakugan, or install the package or its `@types` package |
 | `note` | `env` | Live code reads environment variables whose values are not hashed | List the ones the build inlines under `"env"`, for example `["API_*"]` |
 | `note` | `shallow-clone` | The clone has no full history | In CI, set `fetch-depth: 0` on `actions/checkout` |
 

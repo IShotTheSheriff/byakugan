@@ -38,13 +38,34 @@ const linkedDirectory = (file: string): string | undefined => {
   }
 };
 
-export const inputHash = (file: string, content: Buffer | string, filterDependencies: boolean): string => {
-  if (filterDependencies && basename(file) === 'package.json') {
+/** package.json fields of a workspace package that no importer's build reads. */
+const LIBRARY_FIELDS_UNREAD = ['scripts', 'description', 'keywords', 'author', 'contributors', 'license', 'repository', 'homepage', 'bugs', 'funding'];
+
+/**
+ * `subpaths` is set for the package.json of a workspace package the app imports: the `exports`
+ * keys its imports name, as `.` and `./button`. An exact key no import names cannot change where
+ * an import resolves, so it is left out, along with `scripts` and the descriptive fields. A key
+ * with `*` and a condition map without subpaths stay whole.
+ */
+export const inputHash = (file: string, content: Buffer | string, filterDependencies: boolean, subpaths?: ReadonlySet<string>): string => {
+  if ((filterDependencies || subpaths) && basename(file) === 'package.json') {
     try {
       const manifest = parseJsonc(content.toString());
       if (typeof manifest === 'object' && manifest !== null && !Array.isArray(manifest)) {
         const copy = { ...(manifest as Record<string, unknown>) };
-        for (const field of DEPENDENCY_FIELDS) delete copy[field];
+        if (filterDependencies) for (const field of DEPENDENCY_FIELDS) delete copy[field];
+        if (subpaths) {
+          for (const field of LIBRARY_FIELDS_UNREAD) delete copy[field];
+          const exports = copy.exports;
+          if (typeof exports === 'object' && exports !== null && !Array.isArray(exports)) {
+            const keys = Object.keys(exports);
+            if (keys.length > 0 && keys.every(k => k.startsWith('.'))) {
+              // A key that ends in `/` maps a whole directory, as `*` does.
+              const kept = keys.filter(k => subpaths.has(k) || k.includes('*') || k.endsWith('/'));
+              copy.exports = Object.fromEntries(kept.map(k => [k, (exports as Record<string, unknown>)[k]]));
+            }
+          }
+        }
         return hashOf(JSON.stringify(copy));
       }
     } catch {}
@@ -433,10 +454,13 @@ export class UsageGraph {
     for (const stem of this.resolver.variantStems) this.patterns.shadowed.add(stem);
     for (const u of this.unresolved) {
       if (!this.isProjectImport(u)) continue;
-      this.warn(
-        `${this.fileKey(u.from)}: cannot resolve "${u.specifier}", so changes behind it are invisible ` +
-          '(a bundler alias byakugan does not read, or a plugin\'s virtual module: list it under "virtual" in byakugan.json)'
-      );
+      // `affected` leaves these out: a type import cannot change what the app runs.
+      if (u.type) this.warn(`${this.fileKey(u.from)}: cannot resolve "${u.specifier}", which only types ask for, so the types behind it do not count`);
+      else
+        this.warn(
+          `${this.fileKey(u.from)}: cannot resolve "${u.specifier}", so changes behind it are invisible ` +
+            '(a bundler alias byakugan does not read, or a plugin\'s virtual module: list it under "virtual" in byakugan.json)'
+        );
     }
     return this;
   }
@@ -524,8 +548,33 @@ export class UsageGraph {
       if (pkg && pkg.dir !== this.project.dir && this.inside(pkg.dir)) dirs.add(pkg.dir);
     }
     for (const dir of [...dirs].sort()) {
-      for (const file of [join(dir, 'package.json'), ...tsconfigFiles(dir, this.project.repo)]) if (!this.live.has(this.fileKey(file))) this.markInput(file);
+      const manifest = join(dir, 'package.json');
+      if (!this.live.has(this.fileKey(manifest))) this.manifestSubpaths.set(manifest, this.usedSubpaths(manifest));
+      for (const file of [manifest, ...tsconfigFiles(dir, this.project.repo)]) if (!this.live.has(this.fileKey(file))) this.markInput(file);
     }
+  }
+
+  /** The package.json of each workspace package the app imports, with the `exports` keys its imports name. */
+  private manifestSubpaths = new Map<string, Set<string>>();
+
+  /** `./button` for `@acme/ui/button` and `.` for `@acme/ui`, over every specifier the walk resolved. */
+  private usedSubpaths(manifest: string): Set<string> {
+    const subpaths = new Set<string>();
+    let name: unknown;
+    try {
+      name = (parseJsonc(readText(manifest) ?? '{}') as { name?: unknown } | undefined)?.name;
+    } catch {}
+    if (typeof name !== 'string' || name === '') return subpaths;
+    for (const specifier of this.resolver.asked) {
+      if (specifier === name) subpaths.add('.');
+      else if (specifier.startsWith(`${name}/`)) subpaths.add(`.${specifier.slice(name.length)}`);
+    }
+    return subpaths;
+  }
+
+  /** The hash `markInput` gives `file` for `content`, so git mode can hash the base side the same way. */
+  inputHashOf(file: string, content: Buffer | string): string {
+    return inputHash(file, content, this.project.lockfile !== undefined, this.manifestSubpaths.get(file));
   }
 
   private virtual?: (specifier: string) => boolean;
@@ -912,7 +961,7 @@ export class UsageGraph {
     if (!read) return;
     const via = nodeId('I', file);
     this.parents.set(via, null);
-    const hash = 'hash' in read ? read.hash : inputHash(file, read.content, this.project.lockfile !== undefined);
+    const hash = 'hash' in read ? read.hash : this.inputHashOf(file, read.content);
     this.markKey(this.fileKey(file), file, hash, via);
   }
 

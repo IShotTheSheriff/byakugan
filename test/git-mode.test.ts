@@ -1028,6 +1028,32 @@ describe('git mode: package.json of workspace packages', () => {
     assert.deepEqual(reasons(since(web)), [['input', 'packages/ui/package.json']]);
   });
 
+  test('a new exports key no import names is not affected, and the fingerprint stays', () => {
+    const { dir, web } = workspace();
+    const before = analyze({ cwd: web }).fingerprint();
+    edit(dir, 'packages/ui/package.json', s => s.replace('".": "./src/index.ts"', '".": "./src/index.ts", "./alt": "./src/alt.ts"'));
+    assert.equal(since(web).affected, false);
+    assert.equal(analyze({ cwd: web }).fingerprint(), before);
+  });
+
+  test('a new exports key with a star is affected, since it can match any import', () => {
+    const { dir, web } = workspace();
+    edit(dir, 'packages/ui/package.json', s => s.replace('".": "./src/index.ts"', '".": "./src/index.ts", "./*": "./src/*.ts"'));
+    assert.deepEqual(reasons(since(web)), [['input', 'packages/ui/package.json']]);
+  });
+
+  test('a script of a workspace package the app imports is not affected', () => {
+    const { dir, web } = workspace();
+    edit(dir, 'packages/ui/package.json', s => s.replace('"private": true,', '"private": true,\n  "scripts": { "lint": "eslint ." },'));
+    assert.equal(since(web).affected, false);
+  });
+
+  test("a script of the app's own package.json still is", () => {
+    const { dir, web } = workspace();
+    edit(dir, 'apps/web/package.json', s => s.replace(/\{/, '{\n  "scripts": { "prebuild": "node gen.js" },'));
+    assert.deepEqual(reasons(since(web)), [['input', 'apps/web/package.json']]);
+  });
+
   test('editing the package.json of a workspace package the app does not import is not affected', () => {
     const { dir, web } = workspace();
     edit(dir, 'packages/unused/package.json', s => s.replace('./index.ts', './other.ts'));

@@ -357,6 +357,15 @@ describe('cli doctor', () => {
     assert.match(stdout, /- src\/main\.tsx: cannot resolve "\.\/gone"/);
   });
 
+  test('a type-only import that cannot be resolved is a note, and exits with 0', () => {
+    const dir = fixture('basic');
+    edit(dir, 'src/main.tsx', s => `import type { Route } from './+types/home';\nexport type R = Route;\n${s}`);
+    const { code, stdout } = run(['doctor', '-C', dir]);
+    assert.equal(code, 0, stdout);
+    assert.match(stdout, /^note\s+1 type-only import cannot be resolved/m);
+    assert.doesNotMatch(stdout, /^blocks/m);
+  });
+
   test('--json lists findings by severity and kind', () => {
     const dir = fixture('basic');
     edit(dir, 'src/main.tsx', s => `import './gone';\n${s}`);

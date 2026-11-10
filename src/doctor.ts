@@ -48,6 +48,14 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 /** Graph warnings, grouped by their text. A new warning in graph.ts lands in `other` until it gets a rule here. */
 const RULES: Rule[] = [
   {
+    kind: 'unresolved-type-import',
+    test: /cannot resolve "[^"]*", which only types ask for/,
+    severity: 'note',
+    title: n => `${plural(n, 'type-only import')} cannot be resolved`,
+    cost: 'Verdicts stay right, since a type import cannot change what the app runs. The types behind it are not hashed.',
+    fix: 'Run code generation before byakugan when a tool generates the types. Otherwise install the package or its @types package.',
+  },
+  {
     kind: 'unresolved-import',
     test: /cannot resolve "/,
     severity: 'blocks',

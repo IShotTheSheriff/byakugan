@@ -6,7 +6,6 @@ import { globMatcher, safeGlob, staticPrefix } from './glob.ts';
 import {
   fragmentKey,
   hashOf,
-  inputHash,
   loadModule,
   moduleFragments,
   nodeId,
@@ -342,7 +341,6 @@ export const affectedSinceCommit = (graph: UsageGraph, base: string): AffectedRe
   const isInput = globMatcher(project.inputPatterns, { dot: true });
   const isEntry = globMatcher(project.entryPatterns, { dot: true });
   const isGenerated = globMatcher(project.config.generated ?? [], { dot: true });
-  const filterDependencies = project.lockfile !== undefined;
   /** Base-side content of every changed file, `null` when HEAD added it. Tailwind rescans with it. */
   const baseContents: Record<string, string | null> = {};
   const toProject = (file: string) => relative(project.dir, file).split(sep).join('/');
@@ -544,7 +542,7 @@ export const affectedSinceCommit = (graph: UsageGraph, base: string): AffectedRe
     const inputKey = graph.fileKey(path);
     const input = graph.live.get(inputKey);
     if (input && parseNodeId(input.via).kind === 'I') {
-      const beforeHash = old === undefined ? undefined : inputHash(path, old, filterDependencies);
+      const beforeHash = old === undefined ? undefined : graph.inputHashOf(path, old);
       if (beforeHash !== input.hash) reasons.push({ kind: 'input', key: inputKey, detail: old === undefined ? 'added' : 'changed', chain: [] });
       else ignored.push({ path: change.path, fragments: [] });
       continue;

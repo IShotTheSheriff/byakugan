@@ -95,6 +95,10 @@ Besides code, the fingerprint covers:
 
 - `package.json`. With a lockfile, byakugan leaves out the dependency ranges,
   because it hashes the installed code instead. Without one, the ranges count.
+  From the `package.json` of a workspace package the app imports, byakugan
+  also leaves out `scripts`, the descriptive fields and every exact `exports`
+  key that no import of the app names. A new `"./modal"` export reaches only
+  the apps that import `@acme/ui/modal`.
 - the `tsconfig.json` or `jsconfig.json` chain, `.env*`, `public/**`, global
   `.d.ts` files and Next.js static metadata files such as `favicon.ico`;
 - the installed version of tools that read the app without being imported:

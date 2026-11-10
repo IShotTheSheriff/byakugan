@@ -193,7 +193,9 @@ it is not a library. A library is a package that another workspace package
 lists in `dependencies`, `peerDependencies` or `optionalDependencies`, or lists
 only in `devDependencies` and that has no `start` script. A server that an
 end-to-end test package lists in `devDependencies` and starts with
-`npm start` is an app. `packages/ui` is none of these, so
+`npm start` is an app. A framework in the dependencies of a library makes it
+an app only when the framework's config file is there too, so a logging
+package with `next` among its dependencies stays a library. `packages/ui` is none of these, so
 it gets no verdict of its own; its changes show up in the apps that use it. An
 API whose types the web app imports (Hono RPC) is a dependency of the web app,
 so give it a `byakugan.json` to get a verdict. An app whose graph fails, for

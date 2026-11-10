@@ -201,12 +201,16 @@ export class Resolver {
     }
   }
 
+  /** Every specifier a lookup named. `usedSubpaths` reads the `exports` keys in use from it. */
+  readonly asked = new Set<string>();
+
   /** All files `specifier` can point at from `fromFile`, across export conditions. Empty when unresolved. */
   resolve(specifier: string, fromFile: string): string[] {
     if (this.isBuiltin(specifier)) return [];
     // Vite `./app.css?url`: the query picks a loader, the file is the same.
     const query = specifier.indexOf('?');
     if (query > 0) specifier = specifier.slice(0, query);
+    this.asked.add(specifier);
     const relativeSpecifier = specifier.startsWith('.') || specifier.startsWith('/');
     const external = isInNodeModules(fromFile);
     const cacheKey = `${dirname(fromFile)}\0${specifier}`;
@@ -257,6 +261,7 @@ export class Resolver {
    * the package can be found, `package` names it so its version can stand in for the file.
    */
   resolveStyle(specifier: string, fromFile: string): { file?: string; package?: string } {
+    this.asked.add(specifier);
     this.checkLookup(specifier, fromFile);
     const external = isInNodeModules(fromFile);
     const resolver = this.styleResolvers[external ? 1 : 0];

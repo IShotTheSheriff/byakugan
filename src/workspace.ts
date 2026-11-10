@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { readText } from './fs.ts';
 import { DEPENDENCY_FIELDS } from './graph.ts';
@@ -38,6 +38,16 @@ export const workspacePatterns = (root: string): string[] => {
   return patterns.map(p => p.replace(/^\.\//, '').replace(/\/$/, ''));
 };
 
+const FRAMEWORK_CONFIG = /^((next|vite|react-router|remix|nuxt|svelte|astro)\.config\.[cm]?[jt]s|app\.json)$/;
+
+const hasFrameworkConfig = (dir: string): boolean => {
+  try {
+    return readdirSync(dir).some(name => FRAMEWORK_CONFIG.test(name));
+  } catch {
+    return false;
+  }
+};
+
 export interface WorkspaceApp {
   /** Directory relative to the workspace root, with `/`. */
   path: string;
@@ -48,7 +58,8 @@ export interface WorkspaceApp {
 
 /**
  * Workspace packages and Nx projects that are apps: an Nx `projectType` of `application`, a detected framework, a Cloudflare Worker, a `byakugan.json`,
- * or a package that is not a library. A library is imported by the apps that use it, so its own
+ * or a package that is not a library. A framework found only in the dependencies of a library does
+ * not count: the library needs the framework's config file too. A library is imported by the apps that use it, so its own
  * verdict says nothing. A package is a library when another workspace package lists it in
  * `dependencies`, `peerDependencies` or `optionalDependencies`, or lists it only in
  * `devDependencies` and it has no `start` script (a server that end-to-end tests depend on is
@@ -110,7 +121,10 @@ export const workspaceApps = (root: string, config?: Config): WorkspaceApp[] => 
       continue;
     }
     if (project.entries.length === 0 || project.entries.every(isConfigEntry)) continue;
-    const app = nxApps.has(dir) || project.framework !== 'none' || project.workers || existsSync(join(dir, 'byakugan.json')) || !isLibrary(names.get(dir));
+    // `next` in the dependencies of a logging package is there for its types. Without a framework
+    // config file, a package that others depend on stays a library.
+    const framework = project.framework !== 'none' && (!isLibrary(names.get(dir)) || hasFrameworkConfig(dir));
+    const app = nxApps.has(dir) || framework || project.workers || existsSync(join(dir, 'byakugan.json')) || !isLibrary(names.get(dir));
     if (app) apps.push({ path, project });
   }
   return apps;

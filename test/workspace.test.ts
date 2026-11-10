@@ -37,6 +37,33 @@ describe('workspace apps', () => {
   });
 });
 
+describe('a library with a framework in its dependencies', () => {
+  /** `logging` has `next` for its types and a file Next.js would pick up as an entry. `web` depends on it. */
+  const logging = (extra: Record<string, string | object> = {}) =>
+    app({
+      'package.json': { name: 'root', private: true, workspaces: ['apps/*', 'packages/*'] },
+      'apps/web/package.json': pkgJson('web', { dependencies: { next: '*', logging: '*' } }),
+      'apps/web/app/page.tsx': 'export default () => null;\n',
+      'packages/logging/package.json': pkgJson('logging', { devDependencies: { next: '*' } }),
+      'packages/logging/src/instrumentation.ts': 'export const register = () => {};\n',
+      ...extra,
+    });
+
+  test('is a library', () => {
+    assert.deepEqual(workspaceApps(logging()).map(a => a.path), ['apps/web']);
+  });
+
+  test('is an app once it has the framework config file', () => {
+    const dir = logging({ 'packages/logging/next.config.ts': 'export default {};\n' });
+    assert.deepEqual(workspaceApps(dir).map(a => a.path), ['apps/web', 'packages/logging']);
+  });
+
+  test('is an app when nothing depends on it', () => {
+    const dir = logging({ 'apps/web/package.json': pkgJson('web', { dependencies: { next: '*' } }) });
+    assert.deepEqual(workspaceApps(dir).map(a => a.path), ['apps/web', 'packages/logging']);
+  });
+});
+
 describe('Nx projects', () => {
   const nx = (extra: Record<string, string | object> = {}) =>
     app({
