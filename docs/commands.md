@@ -217,7 +217,7 @@ files unless you pass `--maps`.
 
 This is how you check byakugan itself. When `affected --strict` says
 unaffected, a build of the change should match a build of the base. The
-default `behavior` mode allows the builds to differ in code nothing runs. On `bobr`, a Next.js 16
+default `behavior` mode allows the builds to differ in code nothing runs. On [bobr](https://github.com/IShotTheSheriff/bobr), a Next.js 16
 monorepo built with Turbopack, two builds of one commit matched. A Prettier run
 over 14 used files with other settings matched too, apart from source maps. A
 change to a function the app uses gave 8 different files. Webpack builds are
