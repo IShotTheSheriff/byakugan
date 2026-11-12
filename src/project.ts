@@ -47,6 +47,15 @@ export interface Config {
    * `strict` also counts code the bundler ships but nothing runs.
    */
   mode?: Mode;
+  /** `false` skips Tailwind, for checks that never read the CSS it generates, such as a typecheck. */
+  tailwind?: boolean;
+  /**
+   * Directory whose PostCSS and Tailwind configs compile the stylesheets, relative to the project.
+   * Storybook in a host package compiles other packages' stylesheets with the host's configs.
+   */
+  tailwindDir?: string;
+  /** Read each stylesheet's PostCSS config from its own directory up, as webpack's postcss-loader does. */
+  postcssFromStylesheet?: boolean;
 }
 
 export type Mode = 'behavior' | 'strict';
@@ -561,6 +570,15 @@ export const loadProject = (options: LoadProjectOptions = {}): Project => {
     fileConfig = checkConfig(configFile, parsed);
   }
   const config: Config = checkConfig('config', { ...fileConfig, ...options.config });
+  if (config.tailwindDir !== undefined) {
+    // The Tailwind worker reads configs there, so it must stay inside the repository.
+    const target = resolve(dir, config.tailwindDir);
+    const real = existsSync(target) ? realpathSync(target) : undefined;
+    const boundary = repo ?? root;
+    if (!real || !statSync(real).isDirectory() || !(real === boundary || real.startsWith(boundary + sep))) {
+      throw new Error(`"tailwindDir" names ${config.tailwindDir}, which is not a directory inside the repository`);
+    }
+  }
   if (!options.config && topLevel(dir, PROJECT_SIGNS).length === 0 && !fileConfig) {
     throw new Error(`${dir} has no package.json, framework config or byakugan.json. Run byakugan in the app directory, or pass -C <dir>.`);
   }
@@ -801,6 +819,13 @@ const checkConfig = (file: string, value: unknown): Config => {
   }
   if (config.mode !== undefined && !MODES.includes(config.mode as string)) throw new Error(`${file}: "mode" must be one of ${MODES.join(', ')}`);
   if (config.jsxImportSource !== undefined && typeof config.jsxImportSource !== 'string') throw new Error(`${file}: "jsxImportSource" must be a string`);
+  for (const field of ['tailwind', 'postcssFromStylesheet']) {
+    if (config[field] !== undefined && typeof config[field] !== 'boolean') throw new Error(`${file}: "${field}" must be true or false`);
+  }
+  const tailwindDir = config.tailwindDir;
+  if (tailwindDir !== undefined && (typeof tailwindDir !== 'string' || tailwindDir === '' || isAbsolute(tailwindDir))) {
+    throw new Error(`${file}: "tailwindDir" must be a directory relative to the project`);
+  }
   const rules = config.modularizeImports;
   if (rules !== undefined && (typeof rules !== 'object' || rules === null || Array.isArray(rules))) {
     throw new Error(`${file}: "modularizeImports" must be an object`);

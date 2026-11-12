@@ -37,6 +37,14 @@ changed file and compares the two outputs. With Tailwind v3, a Sass file that
 code imports is compiled with the project's `sass` first, so its partials count
 as part of one root, as they do in the build.
 
+A file Tailwind reaches under several paths, such as a workspace package
+through `node_modules/@acme/ui` in pnpm, is read and scanned once. Git mode
+matches the base side's version of a changed file by inode, so every path to the
+file reads it. Storybook built from a host package compiles each stylesheet with
+the host's configs, and its webpack reads the PostCSS config nearest each
+stylesheet. `tailwindDir` and `postcssFromStylesheet` in
+[`byakugan.json`](configuration.md) do the same.
+
 **shadcn/ui** components are copied into the project, so they are ordinary
 project files. If the app renders `Dialog` and `DialogContent`, a change to
 `DialogFooter` in the same `components/ui/dialog.tsx` does not reach it.

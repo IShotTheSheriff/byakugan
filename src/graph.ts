@@ -582,7 +582,8 @@ export class UsageGraph {
   /** A specifier a bundler plugin provides (`"virtual"` in byakugan.json), such as `~icons/mdi/home`. */
   isVirtual(specifier: string): boolean {
     this.virtual ??= globMatcher(this.project.config.virtual ?? [], { dot: true });
-    return this.virtual(specifier);
+    // The matcher drops a leading `./` from each pattern, so `"./urls.json"` must match without it too.
+    return this.virtual(specifier.replace(/^\.\//, ''));
   }
 
   /** Next.js aliases these to its own compiled copies, so installing them is optional. */
@@ -717,6 +718,8 @@ export class UsageGraph {
    * to an unimported file counts only when it changes the generated CSS.
    */
   private useTailwind() {
+    // `"tailwind": false`: the check that reads this graph never looks at the generated CSS.
+    if (this.project.config.tailwind === false) return;
     const isStyle = (file: string) => STYLE_EXTENSIONS.has(extname(file)) && this.modules.get(file)?.kind === 'opaque';
     const styles = [...this.files.values()].filter(r => r.evaluated && isStyle(r.file)).map(r => r.file);
     const isRoot = (file: string) => {
@@ -780,10 +783,14 @@ export class UsageGraph {
 
   /** What to ask the Tailwind worker for `roots`, the same way for both sides of a comparison. */
   tailwindRequest(roots: string[], overrides?: Record<string, string | null>): TailwindRequest {
-    const { framework, dir } = this.project;
+    const { framework, config, repo } = this.project;
+    // `tailwindDir`: the stylesheets compile with another package's PostCSS and Tailwind configs, as
+    // when Storybook in a host package builds the stories and stylesheets of other packages.
+    const dir = config.tailwindDir ? resolve(this.project.dir, config.tailwindDir) : this.project.dir;
     // Vite runs postcss-import before the project's PostCSS plugins, so Tailwind sees `@import`s inlined.
     const inlineImports = framework === 'vite' || framework === 'react-router';
-    return { dir, roots, members: this.tailwindMembers, inlineImports, ...(overrides ? { overrides } : {}) };
+    const nearest = config.postcssFromStylesheet === true ? { nearestPostcss: true, repo } : {};
+    return { dir, roots, members: this.tailwindMembers, inlineImports, ...nearest, ...(overrides ? { overrides } : {}) };
   }
 
   /** Stable key for a file: root-relative path, or `npm:<package>/<path>` inside node_modules. */
@@ -1449,7 +1456,24 @@ export class UsageGraph {
     const exported = (name: string) => node('S', name) ?? node('T', name) ?? node('S', '*') ?? node('T', '*') ?? starred(name);
     if (id === '<module>') return this.isEvaluated(file) ? nodeId('M', file) : undefined;
     if (id.startsWith('export:')) return exported(id.slice('export:'.length));
-    if (id === '' || id === '<types>' || id.startsWith('export*:')) return this.files.has(file) ? this.anyNode(file) : undefined;
+    if (id === '' || id === '<types>') return this.files.has(file) ? this.anyNode(file) : undefined;
+    if (id.startsWith('export*:')) {
+      if (!this.files.has(file)) return undefined;
+      // A changed or removed `export *` counts whenever the file is reached. A new one changes
+      // nothing unless its module exports a name something takes from this file: that name now
+      // resolves there or becomes ambiguous. Its side effects count in `<imports>`, and a
+      // target that does not resolve counts as unresolved.
+      const source = id.slice('export*:'.length);
+      const head = this.load(file);
+      const added = base?.kind === 'esm' && head.kind === 'esm' && !base.stars.some(s => s.source === source);
+      const used = this.files.get(file)?.used ?? new Set<string>();
+      if (!added || used.has('*')) return this.anyNode(file);
+      for (const target of this.resolver.resolve(source, file)) {
+        if (this.load(target).kind !== 'esm') return this.anyNode(file);
+        for (const name of this.exportNames(target)) if (used.has(name)) return exported(name) ?? this.anyNode(file);
+      }
+      return undefined;
+    }
     if (id.startsWith('import:')) {
       const name = id.slice('import:'.length);
       return node('D', name) ?? node('Y', name);

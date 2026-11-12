@@ -402,6 +402,11 @@ describe('byakugan.json', () => {
     ['{ "framework": "gatsby" }', /"framework" must be one of next, vite, react-router, nuxt, sveltekit, astro, react-native, none/],
     ['{ "jsxImportSource": 5 }', /"jsxImportSource" must be a string/],
     ['{ "modularizeImports": [] }', /"modularizeImports" must be an object/],
+    ['{ "tailwind": "no" }', /"tailwind" must be true or false/],
+    ['{ "postcssFromStylesheet": 1 }', /"postcssFromStylesheet" must be true or false/],
+    ['{ "tailwindDir": "/etc" }', /"tailwindDir" must be a directory relative to the project/],
+    ['{ "tailwindDir": "../../../.." }', /"tailwindDir" names \.\.\/\.\.\/\.\.\/\.\., which is not a directory inside the repository/],
+    ['{ "tailwindDir": "missing" }', /"tailwindDir" names missing, which is not a directory inside the repository/],
   ] as const) {
     test(`byakugan.json ${config} is rejected`, () => {
       assert.throws(() => loadProject({ cwd: web({ 'byakugan.json': config }) }), message);

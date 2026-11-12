@@ -266,6 +266,49 @@ describe('git mode: exports that went away', () => {
     });
   });
 
+  describe('a new export * line', () => {
+    const files = {
+      'src/main.ts': "import { a } from './barrel';\nconsole.log(a);\n",
+      'src/barrel.ts': "export * from './one';\n",
+      'src/one.ts': 'export const a = 1;\n',
+      'src/two.ts': 'export const b = 2;\n',
+    };
+    const added = { 'src/barrel.ts': "export * from './one';\nexport * from './two';\n" };
+
+    test('passing on names nothing takes is not affected', () => {
+      assert.equal(compare(files, added).result.affected, false);
+      const deeper = { ...files, 'src/main.ts': "import { a } from './top';\nconsole.log(a);\n", 'src/top.ts': "export * from './barrel';\n" };
+      assert.equal(compare(deeper, added).result.affected, false, 'one barrel further down');
+    });
+
+    test('passing on a name something takes is affected', () => {
+      const { result, keys } = compare({ ...files, 'src/two.ts': 'export const a = 2;\n' }, added);
+      assert.equal(result.affected, true);
+      assert.deepEqual(keys, ['src/barrel.ts#export*:./two']);
+    });
+
+    test('under import * as ns is affected', () => {
+      const { result } = compare({ ...files, 'src/main.ts': "import * as ns from './barrel';\nconsole.log(ns);\n" }, added);
+      assert.equal(result.affected, true);
+    });
+
+    test('to a module with side effects is affected', () => {
+      const { result, keys } = compare({ ...files, 'src/two.ts': 'globalThis.ready = true;\nexport const b = 2;\n' }, added);
+      assert.equal(result.affected, true);
+      assert.deepEqual(keys, ['src/barrel.ts#<imports>']);
+    });
+
+    test('to a file that does not exist is affected', () => {
+      const { result } = compare(files, { 'src/barrel.ts': "export * from './one';\nexport * from './nope';\n" });
+      assert.equal(result.affected, true);
+    });
+
+    test('changing a kept line is affected', () => {
+      const { result } = compare({ ...files, 'src/barrel.ts': "export * from './one';\nexport * from './two';\n" }, { 'src/barrel.ts': "export * from './one';\nexport type * from './two';\n" });
+      assert.equal(result.affected, true);
+    });
+  });
+
   describe('through a namespace import read as ns.member', () => {
     const files = {
       'src/main.ts': "import * as ns from './lib';\nexport const r = ns.price(1);\n",

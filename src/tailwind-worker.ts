@@ -36,8 +36,28 @@ const overrides = new Map(Object.entries(request.overrides ?? {}));
 const sha = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 20);
 const load = async (path: string) => (await import(pathToFileURL(path).href)) as Record<string, any>;
 
-const contentOf = (file: string): string | undefined => {
-  if (overrides.has(file)) return overrides.get(file) ?? undefined;
+const STYLESHEET = /\.(css|scss|sass|less|styl|pcss)$/;
+
+/**
+ * One key per file on disk. Globs follow symlinks, so in a pnpm workspace one file sits under
+ * many paths. A stat costs one syscall, where realpath costs one per path segment. Inode 0 means
+ * the file system has no stable inode, so such a file keeps its path.
+ */
+const fileKey = (file: string) => {
+  try {
+    const stat = statSync(file);
+    if (stat.ino !== 0) return `i:${stat.dev}:${stat.ino}`;
+  } catch {}
+  return `p:${file}`;
+};
+
+// Git mode names each override by its path in the repository. Every other path to that file,
+// such as node_modules/@acme/ui/src/card.ts in a pnpm workspace, must read the override too,
+// or a class added there shows up on both sides of the comparison.
+const overrideByKey = new Map([...overrides].map(([file, content]) => [fileKey(file), content]));
+
+const contentOf = (key: string, file: string): string | undefined => {
+  if (overrideByKey.has(key)) return overrideByKey.get(key) ?? undefined;
   try {
     return readFileSync(file, 'utf8');
   } catch {
@@ -45,15 +65,27 @@ const contentOf = (file: string): string | undefined => {
   }
 };
 
-const STYLESHEET = /\.(css|scss|sass|less|styl|pcss)$/;
-
-/** `skipStyles`: v4 takes no class names from stylesheets (only CSS variables), so neither do we. */
+/**
+ * `skipStyles`: v4 takes no class names from stylesheets (only CSS variables), so neither do we.
+ * Candidates depend only on a file's extension and content, so each file is read once and each
+ * extension and content pair is scanned once.
+ */
 const items = (files: string[], skipStyles = false): Item[] => {
   const out: Item[] = [];
+  const seenFiles = new Set<string>();
+  const seenContents = new Set<string>();
   for (const file of files) {
     if (skipStyles && STYLESHEET.test(file)) continue;
-    const content = contentOf(file);
-    if (content !== undefined) out.push({ content, extension: extname(file).slice(1) });
+    const key = fileKey(file);
+    if (seenFiles.has(key)) continue;
+    seenFiles.add(key);
+    const content = contentOf(key, file);
+    if (content === undefined) continue;
+    const extension = extname(file).slice(1);
+    const id = `${extension}:${sha(content)}`;
+    if (seenContents.has(id)) continue;
+    seenContents.add(id);
+    out.push({ content, extension });
   }
   return out;
 };
@@ -132,17 +164,37 @@ const v4 = async (root: string, require: Require) => {
 
 const POSTCSS_CONFIGS = ['postcss.config.js', 'postcss.config.cjs', 'postcss.config.mjs', 'postcss.config.ts', '.postcssrc', '.postcssrc.json', '.postcssrc.js', '.postcssrc.cjs'];
 
-/** The PostCSS config text, read but not run: it only tells which plugins and Tailwind config the build uses. */
-const postcssConfig = (): { dir: string; text: string } | undefined => {
-  for (const name of POSTCSS_CONFIGS) {
-    const file = join(request.dir, name);
-    if (existsSync(file)) return { dir: request.dir, text: readFileSync(file, 'utf8') };
+/**
+ * The PostCSS config text, read but not run: it only tells which plugins and Tailwind config the
+ * build uses. Next.js and Vite read the project's own. With `nearestPostcss`, the one nearest the
+ * stylesheet, as postcss-loader finds it, up to the repository root.
+ */
+const postcssConfig = (root: string): { file: string; dir: string; text: string } | undefined => {
+  const dirs = [request.dir];
+  if (request.nearestPostcss) {
+    dirs.length = 0;
+    const stop = request.repo ?? request.dir;
+    for (let dir = dirname(root); ; dir = dirname(dir)) {
+      dirs.push(dir);
+      if (dir === stop || dirname(dir) === dir || !dir.startsWith(stop + sep)) break;
+    }
+  }
+  for (const dir of dirs) {
+    for (const name of POSTCSS_CONFIGS) {
+      const file = join(dir, name);
+      if (existsSync(file)) return { file, dir, text: readFileSync(file, 'utf8') };
+    }
   }
 };
 
-/** `tailwindcss: { config }`, `tailwindcss({ config })` or `require('tailwindcss')({ config })` in the PostCSS config. */
+/**
+ * `tailwindcss: { config }`, `tailwindcss({ config })` or `require('tailwindcss')({ config })` in the
+ * PostCSS config. The path may sit in `path.join(__dirname, ...)` or `path.resolve(__dirname, ...)`.
+ */
 const configFromPostcss = (postcss: { dir: string; text: string } | undefined) => {
-  const match = postcss && /tailwindcss['"]?\)?\s*[:(]\s*\{[^}]{0,500}?\bconfig\s*:\s*['"]([^'"]+)['"]/.exec(postcss.text);
+  const match =
+    postcss &&
+    /tailwindcss['"]?\)?\s*[:(]\s*\{[^}]{0,500}?\bconfig\s*:\s*(?:(?:path\.)?(?:join|resolve)\(\s*__dirname\s*,\s*)?['"]([^'"]+)['"]/.exec(postcss.text);
   return match && postcss ? resolve(postcss.dir, match[1]) : undefined;
 };
 
@@ -201,7 +253,7 @@ const v3 = async (root: string, tailwindDir: string) => {
   const loadConfigModule = local(join(tailwindDir, 'loadConfig.js'));
   const loadConfig = loadConfigModule.default ?? loadConfigModule;
   const css = /\.s[ac]ss$/.test(root) ? compileSass(root) : readFileSync(root, 'utf8');
-  const postcssFile = postcssConfig();
+  const postcssFile = postcssConfig(root);
   const configRef = /@config\s+['"]([^'"]+)['"]/.exec(css)?.[1];
   const configPath = configRef
     ? resolve(dirname(root), configRef)
@@ -240,7 +292,7 @@ const v3 = async (root: string, tailwindDir: string) => {
   } else {
     for (const member of members) output += `${(await postcss([plugin()]).process(readFileSync(member, 'utf8'), { from: member })).css as string}\n`;
   }
-  return { hash: sha(output), files, deps: configPath ? [configPath] : [] };
+  return { hash: sha(output), files, deps: [...(configPath ? [configPath] : []), ...(postcssFile ? [postcssFile.file] : [])] };
 };
 
 const results: TailwindResult[] = [];

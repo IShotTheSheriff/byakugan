@@ -13,6 +13,10 @@ export interface TailwindRequest {
   inlineImports?: boolean;
   /** Absolute path -> content to scan instead of the file on disk, or `null` to leave it out. */
   overrides?: Record<string, string | null>;
+  /** Read each stylesheet's PostCSS config from its own directory up to `repo`, as postcss-loader does. */
+  nearestPostcss?: boolean;
+  /** Repository root, where the search for the nearest PostCSS config stops. */
+  repo?: string;
 }
 
 export interface TailwindResult {

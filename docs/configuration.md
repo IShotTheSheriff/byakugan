@@ -29,6 +29,9 @@ Everything is optional. Put a `byakugan.json` next to the app's `package.json`:
 | `virtual`           | Specifiers a bundler plugin provides (globs), such as `~icons/**` for unplugin-icons. They no longer count as unresolved. |
 | `env`               | Environment variables whose values count when live code reads them (globs over names), such as `API_*`. |
 | `mode`              | `behavior` (default) or `strict`. See [Modes](commands.md#modes).                                                          |
+| `tailwind`          | `false` skips Tailwind and the hash of the CSS it generates. For a graph that feeds a typecheck or unit tests, which never read that CSS. |
+| `tailwindDir`       | Directory whose PostCSS and Tailwind configs compile the stylesheets, relative to the project and inside the repository. Storybook in a host package compiles other packages' stylesheets with the host's configs. |
+| `postcssFromStylesheet` | `true` reads each stylesheet's PostCSS config from its own directory up to the repository root, as webpack's postcss-loader does. By default the project's own config counts, as in Next.js and Vite. |
 
 byakugan rejects a `byakugan.json` that is not valid JSON or has a field of
 the wrong type, for example a string where a list belongs.

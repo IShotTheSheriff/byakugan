@@ -1025,6 +1025,22 @@ describe('"virtual" in byakugan.json', () => {
     assert.equal(result.affected, false, explain(dir, result));
   });
 
+  test('a pattern with a leading ./ matches the relative specifier', () => {
+    const local = (virtual: string[]) =>
+      app(
+        {
+          ...VITE,
+          'byakugan.json': { virtual },
+          '.gitignore': 'urls.json\n',
+          'index.html': '<script type="module" src="/src/main.ts"></script>\n',
+          'src/main.ts': "import urls from './urls.json';\nconsole.log(urls);\n",
+        },
+        { repo: true }
+      );
+    assert.deepEqual(warned(local(['./urls.json'])), []);
+    assert.deepEqual(warned(local(['./other.json'])), ['./urls.json']);
+  });
+
   test('leaves every specifier it does not match failing closed', () => {
     assert.deepEqual(warned(plugins()), ['~icons/mdi/home', '~react-pages']);
     // `*` stops at a slash, like any glob.
