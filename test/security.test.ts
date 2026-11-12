@@ -1316,11 +1316,23 @@ describe('a symlinked directory counts wherever the build reads it', () => {
     return dir;
   };
 
-  // 8,000 such links took 4 s a crawl, 16,000 took 30 s.
+  // 8,000 such links took 4 s a crawl, 16,000 took 30 s. A fixed time limit fails on a slow
+  // runner, so the test times runs on the same machine instead. Past the cost of a run with no
+  // links, 12,000 links take about 3 times as long as 4,000 in a linear crawl, 9 times in a
+  // quadratic one.
   test(
     'twelve thousand links to distinct directories crawl in linear time',
     () => {
-      finished(cli(['hash', '-C', manyLinks(12_000)], 8_000));
+      const timed = (n: number) => {
+        const dir = manyLinks(n);
+        const start = performance.now();
+        finished(cli(['hash', '-C', dir], 120_000));
+        return performance.now() - start;
+      };
+      const none = timed(0);
+      const small = timed(4_000) - none;
+      const large = timed(12_000) - none;
+      assert.ok(large < small * 5, `past ${Math.round(none)} ms, 12,000 links took ${Math.round(large)} ms, 4,000 took ${Math.round(small)} ms`);
     }
   );
 
