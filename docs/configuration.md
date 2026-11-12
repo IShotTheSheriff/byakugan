@@ -1,6 +1,18 @@
 # Configuration
 
-Everything is optional. Put a `byakugan.json` next to the app's `package.json`:
+Everything is optional. Put a `byakugan.json` next to the app's `package.json`.
+byakugan reads it from the directory it runs in (`-C <dir>`). The file does two
+things:
+
+- It fills in what byakugan cannot detect: entries outside the framework's
+  conventions, files that a tool reads without an import, imports that a
+  bundler plugin provides, and how Tailwind compiles the stylesheets.
+- It makes a directory an app. `--workspace` gives a verdict to every package
+  with a `byakugan.json`, even a library or a test package with no framework.
+  A test package with `{ "entry": ["tests/**/*.spec.ts"] }` gets one verdict,
+  and an edited spec counts.
+
+An app that uses most fields:
 
 ```json
 {

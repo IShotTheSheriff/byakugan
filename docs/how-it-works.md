@@ -77,6 +77,12 @@
    not imports at all, listed under
    [Next.js, Tailwind and shadcn](frameworks.md#nextjs-tailwind-and-shadcn).
 
+   An `export *` line counts when a name the app takes passes through it. A
+   new `export *` line in a barrel reaches no app that imports only other
+   names from that barrel. It counts when its module exports a name the app
+   takes, when something imports the barrel's whole namespace, when the module
+   it adds runs top-level code, and when that module does not resolve.
+
    byakugan follows an `import type` through types only. The declarations it
    reaches count, but the target module does not run. Its side effects stay
    out, and so do packages that only its runtime code imports.

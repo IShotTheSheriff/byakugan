@@ -46,7 +46,7 @@
     <a class="wordmark" href="#top">byakugan</a>
     <nav class="nav-pill" aria-label="Main">
       <i class="nav-hi" aria-hidden="true"></i>
-      <a class="nav-item" href="#why">Why</a><a class="nav-item" href="#how">How it works</a><a class="nav-item" href="#start">Start</a><a class="nav-item" href="#recipes">Recipes</a><a class="nav-item" href="#faq">FAQ</a>
+      <a class="nav-item" href="#why">Why</a><a class="nav-item" href="#how">How it works</a><a class="nav-item" href="#start">Start</a><a class="nav-item" href="#config">Config</a><a class="nav-item" href="#recipes">Recipes</a><a class="nav-item" href="#faq">FAQ</a>
     </nav>
     <a class="key key-sm" href="https://github.com/IShotTheSheriff/byakugan">GitHub <svg class="arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
   </div>
@@ -244,7 +244,7 @@ changes nothing uses
             <li><code>localFont({ src: './fonts/brand.woff2' })</code> counts the font file.</li>
             <li><code>join(process.cwd(), 'content', slug)</code> counts every file under <code>content/</code>.</li>
             <li><code>'use server'</code> counts every export, since each can be an endpoint.</li>
-            <li>Tailwind: byakugan runs the project's own Tailwind and hashes the CSS it generates.</li>
+            <li>Tailwind: byakugan runs the project's own Tailwind and hashes the CSS it generates. A workspace package that Tailwind scans through <code>node_modules</code> is read once and compared with its base version.</li>
             <li><code>NEXT_PUBLIC_*</code> values that live code reads are part of the fingerprint.</li>
           </ul>
         </div>
@@ -287,6 +287,20 @@ changes nothing uses
             <tr><td>A new page, <code>middleware.ts</code>, an API route</td><td class="yes">affected</td></tr>
             <tr><td>A lucide icon the app renders, patched in node_modules</td><td class="yes">affected</td></tr>
             <tr><td>A lucide icon nothing renders</td><td class="no">unaffected</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel reveal scroll" style="margin-top:24px">
+        <span class="eyebrow">Barrels and workspace packages, from byakugan's test suite</span>
+        <table class="table" style="margin-top:12px">
+          <thead><tr><th>Change</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>A new <code>export *</code> line in a barrel, passing on names the app does not import</td><td class="no">unaffected</td></tr>
+            <tr><td>The same line, when it passes on a name the app imports</td><td class="yes">affected</td></tr>
+            <tr><td>The same line, when the app imports the barrel as <code>import * as ui</code></td><td class="yes">affected</td></tr>
+            <tr><td>The same line, when the module it adds runs top-level code</td><td class="yes">affected</td></tr>
+            <tr><td>A new Tailwind class in a workspace package that Tailwind scans through <code>node_modules</code></td><td class="yes">affected</td></tr>
+            <tr><td>Text that is not a class in the same package file</td><td class="no">unaffected</td></tr>
           </tbody>
         </table>
       </div>
@@ -366,6 +380,47 @@ byakugan doctor · apps/web · next
           </tbody>
         </table>
         <p class="muted small" style="margin:14px 0 0"><code>byakugan &lt;command&gt; --help</code> prints the options, examples, exit codes and JSON shape of a command.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="config">
+    <div class="wrap narrow">
+      <div class="section-head reveal">
+        <h2 class="display">Tell it what it cannot <em>see.</em></h2>
+        <p class="lede">A <code>byakugan.json</code> next to the app's <code>package.json</code> is optional. It names what byakugan cannot detect, and it makes a directory an app.</p>
+      </div>
+      <div class="panel reveal">
+<pre class="code">{
+  "entry": ["scripts/seed.ts"],
+  "inputs": ["messages/*.json"],
+  "virtual": ["~icons/**"],
+  "env": ["API_*"],
+  "conditions": ["source"]
+}</pre>
+        <p class="muted small" style="margin:14px 0 0">With <code>--workspace</code>, every package that has a <code>byakugan.json</code> gets a verdict of its own, even a library or a test package with no framework. byakugan rejects a file that is not valid JSON or has a field of the wrong type.</p>
+      </div>
+      <div class="panel reveal scroll" style="margin-top:20px">
+        <table class="table">
+          <thead><tr><th>Field</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>entry</code></td><td>Extra entry files (globs). Every export of an entry counts as used.</td></tr>
+            <tr><td><code>inputs</code></td><td>Files hashed whole, for files a tool reads without an import, such as <code>messages/*.json</code>.</td></tr>
+            <tr><td><code>packages</code></td><td>Packages counted by installed version, for tools that read the code without being imported.</td></tr>
+            <tr><td><code>virtual</code></td><td>Specifiers a bundler plugin provides, such as <code>~icons/**</code>. Without it, an import that does not resolve makes every run "affected".</td></tr>
+            <tr><td><code>generated</code></td><td>Git-ignored files the build generates, such as a Prisma client. List the generator's inputs in <code>inputs</code>.</td></tr>
+            <tr><td><code>env</code></td><td>Environment variables whose values count when live code reads them, added to <code>NEXT_PUBLIC_*</code> and <code>VITE_*</code>.</td></tr>
+            <tr><td><code>conditions</code></td><td>Export conditions tried first. Use <code>["source"]</code> when workspace packages point <code>exports</code> at <code>dist</code>.</td></tr>
+            <tr><td><code>modularizeImports</code></td><td>The Next.js option of the same name, merged over the built-in rule for <code>lodash</code>.</td></tr>
+            <tr><td><code>framework</code></td><td>Skips detection. <code>none</code> turns off framework entries.</td></tr>
+            <tr><td><code>jsxImportSource</code></td><td>Defaults to the tsconfig option, then <code>react</code>.</td></tr>
+            <tr><td><code>mode</code></td><td><code>behavior</code> (the default) or <code>strict</code>.</td></tr>
+            <tr><td><code>tailwind</code></td><td><code>false</code> skips Tailwind, for a graph behind a typecheck or unit tests.</td></tr>
+            <tr><td><code>tailwindDir</code></td><td>Compiles the stylesheets with another directory's PostCSS and Tailwind configs, such as a Storybook host package.</td></tr>
+            <tr><td><code>postcssFromStylesheet</code></td><td><code>true</code> reads the PostCSS config nearest each stylesheet, as webpack's postcss-loader does.</td></tr>
+          </tbody>
+        </table>
+        <p class="muted small" style="margin:14px 0 0"><a class="link" href="https://github.com/IShotTheSheriff/byakugan/blob/main/docs/configuration.md">Read the configuration reference</a></p>
       </div>
     </div>
   </section>
@@ -563,6 +618,7 @@ byakugan: <span class="kw">error:</span> Unknown command "affcted"
         <details><summary>How does it relate to Knip?</summary><div>It is Knip's approach turned around. Knip walks from entry files through every import and reports what nothing uses. byakugan does the same walk and keeps the rest, the code the app uses, so it can hash it. Both run on the oxc parser and resolver.</div></details>
         <details><summary>Does it work with webpack and Turbopack?</summary><div>byakugan does not run the bundler. It resolves imports through tsconfig <code>paths</code> and package <code>exports</code>, as both bundlers do. Build comparison was checked against Turbopack builds on Next.js 16. Webpack builds are untested, so run shadow mode before you reuse webpack output.</div></details>
         <details><summary>What about dependency updates?</summary><div>The fingerprint hashes the installed files the app uses, so a lodash release that only changes <code>filter.js</code> keeps the key when the app uses <code>partition</code>. With <code>--base</code>, byakugan reads the lockfile and counts a bump per package. With <code>--base-manifest</code>, it compares per file.</div></details>
+        <details><summary>Does it work with Storybook in a host package?</summary><div>Yes. Storybook built from a host package compiles every package's stylesheets with the host's PostCSS and Tailwind configs, and its webpack reads the PostCSS config nearest each stylesheet. Set <code>"tailwindDir"</code> to the host and <code>"postcssFromStylesheet": true</code> in <code>byakugan.json</code> to compile them the same way. A graph for a typecheck or unit tests never reads the generated CSS, so <code>"tailwind": false</code> skips Tailwind there.</div></details>
         <details><summary>Which frameworks does it know?</summary><div>Next.js gets the most attention: App Router, Pages Router, Tailwind, shadcn, server actions. Vite, React Router, Hono and plain TypeScript packages work too. Any package can name its entries in <code>byakugan.json</code>.</div></details>
         <details><summary>Is it safe to run on pull requests from forks?</summary><div>byakugan reads nothing outside the repository and needs only <code>contents: read</code>. It does run the project's Tailwind, which loads config files from the repository, so run it where you would run the build.</div></details>
         <details><summary>What does it cost?</summary><div>Nothing. byakugan is MIT licensed and runs in your own CI. It sends no data anywhere.</div></details>
