@@ -19,11 +19,9 @@ jobs:
       matrix:
         os: [ubuntu-26.04]
         node: [22, 24, 26]
-        include:
-          # One macOS job covers APFS and the /var -> /private/var link.
-          # macOS arm64 runners queue for a long time, so the rest runs on Linux.
-          - os: macos-26
-            node: 26
+    # No macOS job: GitHub often found no macOS arm64 runner and failed the run after 15
+    # minutes. The case-only rename tests in test/git-mode.test.ts need a case-insensitive file
+    # system, so they skip here and run only in `npm test` on a Mac.
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
