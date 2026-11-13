@@ -220,7 +220,7 @@ with `byakugan compare` before you skip anything.
 | [docs/configuration.md](docs/configuration.md) | Every `byakugan.json` field |
 | [docs/how-it-works.md](docs/how-it-works.md) | Entries, fragments, the walk and the hash |
 | [docs/frameworks.md](docs/frameworks.md) | Next.js, Tailwind, shadcn and Hono in detail, with result tables |
-| [docs/examples/](docs/examples/README.md) | About 850 cases of a change and its result, from case-only renames to `export *` lines and Tailwind classes, each linked to its test |
+| [docs/examples/](docs/examples/README.md) | About 860 cases of a change and its result, from case-only renames to `export *` lines and Tailwind classes, each linked to its test |
 | [docs/limits.md](docs/limits.md) | What costs extra runs, what can miss a change, and security |
 
 ## Programmatic API

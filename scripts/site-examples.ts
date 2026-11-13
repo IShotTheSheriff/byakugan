@@ -50,7 +50,8 @@ const inline = (text: string): string => {
   for (const m of text.matchAll(re)) {
     out += escape(text.slice(last, m.index));
     if (m[1] !== undefined) out += `<code>${escape(m[1])}</code>`;
-    else out += `<a href="${escape(href(m[3]))}">${inline(m[2])}</a>`;
+    // A link to a test reads as a small reference, wherever it sits in a row.
+    else out += `<a${/^\.\.\/\.\.\/test\//.test(m[3]) ? ' class="ref"' : ''} href="${escape(href(m[3]))}">${inline(m[2])}</a>`;
     last = m.index + m[0].length;
   }
   return out + escape(text.slice(last));
@@ -66,19 +67,26 @@ const cells = (row: string) =>
 
 const resultClass = (cell: string) => (/^unaffected\b/i.test(cell) ? ' class="no"' : /^affected\b/i.test(cell) ? ' class="yes"' : '');
 
+/** Renders a table and counts its cases: rows, or filled cells in an Affected | Unaffected table. */
 const table = (rows: string[]) => {
   const head = cells(rows[0]);
+  const side = head.map(h => (h === 'Affected' ? 'yes' : h === 'Unaffected' ? 'no' : ''));
+  const paired = side.some(Boolean);
+  let cases = 0;
   const result = head.findIndex(h => h.toLowerCase() === 'result');
   const test = head.findIndex(h => h.toLowerCase() === 'test');
   const body = rows.slice(2).map(r => {
-    const tds = cells(r).map((c, i) => {
+    const row = cells(r);
+    cases += paired ? row.filter(c => c !== '').length : 1;
+    const tds = row.map((c, i) => {
       const cls = i === result ? resultClass(c) : i === test ? ' class="ref"' : '';
       return `<td${cls}>${inline(c)}</td>`;
     });
     return `<tr>${tds.join('')}</tr>`;
   });
-  const ths = head.map(h => `<th>${inline(h)}</th>`).join('');
-  return `<div class="scroll"><table class="table"><thead><tr>${ths}</tr></thead><tbody>\n${body.join('\n')}\n</tbody></table></div>`;
+  const ths = head.map((h, i) => `<th${side[i] ? ` class="${side[i]}"` : ''}>${inline(h)}</th>`).join('');
+  const cls = paired ? 'table pair' : 'table';
+  return { cases, html: `<div class="scroll"><table class="${cls}"><thead><tr>${ths}</tr></thead><tbody>\n${body.join('\n')}\n</tbody></table></div>` };
 };
 
 interface Page {
@@ -113,8 +121,15 @@ const page = (id: string, name: string): Page => {
     } else if (line.startsWith('|')) {
       const rows: string[] = [];
       for (; i < lines.length && lines[i].startsWith('|'); i++) rows.push(lines[i]);
-      cases += rows.length - 2;
-      emit(table(rows));
+      const t = table(rows);
+      cases += t.cases;
+      emit(t.html);
+    } else if (/^<\/?details>$/.test(line.trim())) {
+      i++;
+      emit(line.trim() === '<details>' ? '<details class="more">' : '</details>');
+    } else if (/^<summary>.*<\/summary>$/.test(line.trim())) {
+      i++;
+      emit(`<summary>${inline(line.trim().slice(9, -10))}</summary>`);
     } else if (/^#{1,4} /.test(line)) {
       const level = line.indexOf(' ');
       const text = line.slice(level + 1);
@@ -127,7 +142,7 @@ const page = (id: string, name: string): Page => {
     } else if (line.trim() === '') i++;
     else {
       const para: string[] = [];
-      for (; i < lines.length && lines[i].trim() !== '' && !/^(```|\||#{1,4} )/.test(lines[i]); i++) para.push(lines[i].trim());
+      for (; i < lines.length && lines[i].trim() !== '' && !/^(```|\||#{1,4} |<\/?details>|<summary>)/.test(lines[i]); i++) para.push(lines[i].trim());
       const text = para.join(' ');
       // The pages link back to the index, which this page replaces.
       if (text !== '[All examples](README.md)') emit(`<p>${inline(text)}</p>`);
@@ -208,6 +223,17 @@ const TEMPLATE = `<!doctype html>
   .table td.ref { white-space: nowrap; font: 500 12.5px/1.5 var(--mono); }
   .table td.ref a { color: var(--ink-3); }
   .yes { color: var(--red); } .no { color: var(--green); }
+  .table.pair td { width: 50%; }
+  .table.pair th.yes { color: var(--red); } .table.pair th.no { color: var(--green); }
+  a.ref { margin-left: 4px; font: 500 12px/1.5 var(--mono); color: var(--ink-3); white-space: nowrap; }
+  td.ref a.ref { margin-left: 0; }
+  details.more { margin-top: 10px; }
+  details.more > summary { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: 999px; background: var(--card-2); box-shadow: var(--hairline); cursor: pointer; list-style: none; font: 600 13px/1 var(--sans); color: var(--ink-2); }
+  details.more > summary::-webkit-details-marker { display: none; }
+  details.more > summary::before { content: "+"; font: 500 15px/1 var(--mono); color: var(--accent); }
+  details.more[open] > summary::before { content: "\\2212"; }
+  details.more > summary:hover { color: var(--ink); }
+  details.more[open] > summary { margin-bottom: 4px; }
   .yes::first-line, .no::first-line { font-weight: 600; }
   [hidden] { display: none !important; }
   @media (max-width: 900px) { .nav-item { padding: 0 9px; } }
@@ -270,6 +296,8 @@ const TEMPLATE = `<!doctype html>
   const text = new Map();
   const rowsOf = new Map(topics.map(t => [t, [...t.querySelectorAll('tbody tr')]]));
   const lower = el => { let s = text.get(el); if (s === undefined) { s = el.textContent.toLowerCase(); text.set(el, s); } return s; };
+  // A row of an Affected | Unaffected table holds one case per filled cell.
+  const weight = r => r.closest('.pair') ? [...r.cells].filter(c => c.textContent.trim()).length : 1;
   const run = () => {
     const terms = q.value.toLowerCase().split(/\\s+/).filter(Boolean);
     const hit = el => terms.every(t => lower(el).includes(t));
@@ -279,8 +307,10 @@ const TEMPLATE = `<!doctype html>
       const head = t.querySelector('h3');
       const whole = terms.length === 0 || hit(head);
       let any = false;
-      for (const r of rows) { const ok = whole || hit(r); r.hidden = !ok; if (ok) { any = true; shown++; } }
+      for (const r of rows) { const ok = whole || hit(r); r.hidden = !ok; if (ok) { any = true; shown += weight(r); } }
       t.hidden = !any && !whole;
+      // A match inside a collapsed block opens it. An empty search closes them again.
+      for (const d of t.querySelectorAll('details.more')) d.open = terms.length > 0 && d.querySelector('tbody tr:not([hidden])') !== null;
     }
     for (const s of sections) s.hidden = s.querySelectorAll('.topic:not([hidden])').length === 0;
     count.textContent = terms.length ? shown + ' of {{total}} cases' : '{{total}} cases';

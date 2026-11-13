@@ -14,8 +14,12 @@ test('site/examples.html has one section per examples page and every case', () =
   const html = render();
   for (const id of ['code', 'packages', 'styles', 'files', 'frameworks', 'git-mode']) assert.match(html, new RegExp(`<section class="section area-section" id="${id}">`));
   assert.equal(html.split('<footer').length, 2);
-  const rows = (html.match(/<td class="ref">/g) ?? []).length;
-  assert.ok(rows > 800, `${rows} rows`);
+  // Every test link in the markdown, collapsed rows included, reaches the page.
+  const dir = join(ROOT, 'docs/examples');
+  const links = readdirSync(dir).flatMap(f => [...readFileSync(join(dir, f), 'utf8').matchAll(/\]\(\.\.\/\.\.\/(test\/[^)]+)\)/g)].map(m => m[1]));
+  assert.ok(links.length > 800, `${links.length} links`);
+  const missing = links.filter(l => !html.includes(`/blob/main/${l}"`));
+  assert.deepEqual(missing, []);
 });
 
 test('every test link in docs/examples lands on a test or a table row', () => {
