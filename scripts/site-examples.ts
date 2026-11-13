@@ -9,14 +9,17 @@ const DOCS = join(ROOT, 'docs/examples');
 const OUT = join(ROOT, 'site/examples.html');
 const BLOB = 'https://github.com/IShotTheSheriff/byakugan/blob/main';
 
-/** The pages in site order, with the short name the nav shows. */
+/**
+ * The pages in site order: id, the short name the nav shows, the section heading (one italic
+ * word, period inside, as on the landing page) and the tile tint, a different one per tile.
+ */
 const PAGES = [
-  ['code', 'Code'],
-  ['packages', 'Packages'],
-  ['styles', 'Styles'],
-  ['files', 'Files'],
-  ['frameworks', 'Frameworks'],
-  ['git-mode', 'Git mode'],
+  ['code', 'Code', 'Exports, barrels and <em>code.</em>', 'rose'],
+  ['packages', 'Packages', 'Packages and <em>lockfiles.</em>', 'lilac'],
+  ['styles', 'Styles', 'CSS, Sass and <em>Tailwind.</em>', 'sage'],
+  ['files', 'Files', 'Renames, deletions and <em>links.</em>', 'sky'],
+  ['frameworks', 'Frameworks', 'Frameworks and <em>workspaces.</em>', 'sand'],
+  ['git-mode', 'Git mode', 'Git mode and <em>manifests.</em>', 'mint'],
 ] as const;
 
 const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -135,17 +138,17 @@ const page = (id: string, name: string): Page => {
 };
 
 export const render = () => {
-  const pages = PAGES.map(([id, name]) => page(id, name));
+  const pages = PAGES.map(([id, name, heading, tint]) => ({ ...page(id, name), heading, tint }));
   const total = pages.reduce((n, p) => n + p.cases, 0);
   const nav = pages.map(p => `<a class="nav-item" href="#${p.id}">${escape(p.name)}</a>`).join('');
   const tiles = pages
-    .map(p => `<a class="area" href="#${p.id}"><span class="area-title">${inline(p.title)}</span><span class="muted small">${p.cases} cases</span></a>`)
+    .map(p => `<a class="tile ${p.tint} area" href="#${p.id}"><span class="area-title">${escape(p.name)}</span><span class="small">${inline(p.title)}</span><span class="muted small">${p.cases} cases</span></a>`)
     .join('\n');
   const sections = pages
     .map(
       p => `<section class="section area-section" id="${p.id}">
 <div class="wrap">
-<div class="section-head"><span class="eyebrow">${p.cases} cases</span><h2 class="display">${inline(p.title)}</h2></div>
+<div class="section-head"><span class="eyebrow">${p.cases} cases</span><h2 class="display">${p.heading}</h2></div>
 <div class="prose intro">
 ${p.intro}</div>
 ${p.topics}
@@ -180,15 +183,14 @@ const TEMPLATE = `<!doctype html>
 <script src="paper.js" defer></script>
 <style>
   .scroll { overflow-x: auto; }
-  .hero { padding-bottom: 0; }
-  .hero-title { font-size: clamp(40px, 6vw, 72px); }
+  .top { padding-top: 72px; }
+  .top .section-head { margin-bottom: 0; }
   .search { display: flex; gap: 12px; align-items: center; margin: 32px auto 0; max-width: 560px; }
   .search input { flex: 1; min-width: 0; height: 46px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--card); box-shadow: var(--hairline), var(--lift-1); color: var(--ink); font: 500 15px/1 var(--mono); }
   .search output { font: 500 13px/1 var(--sans); color: var(--ink-3); white-space: nowrap; }
   .areas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 36px; text-align: left; }
-  .area { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border-radius: 12px; background: var(--card); box-shadow: var(--hairline), var(--lift-1); color: var(--ink); text-decoration: none; transition: transform .15s; }
-  .area:hover { transform: translateY(-2px); }
-  .area-title { font: 480 17px/1.25 var(--serif); }
+  .area { gap: 4px; padding: 16px 18px; text-decoration: none; color: var(--ink); }
+  .area-title { font: 360 24px/1.1 var(--serif); font-style: italic; letter-spacing: -0.02em; }
   .reading { margin-top: 24px; text-align: left; }
   .reading p + p { margin-top: 10px; }
   .area-section { padding-top: 96px; }
@@ -210,10 +212,10 @@ const TEMPLATE = `<!doctype html>
   [hidden] { display: none !important; }
   @media (max-width: 900px) { .nav-item { padding: 0 9px; } }
   @media (max-width: 860px) { .areas { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 560px) { .areas { gap: 8px; } .area { padding: 10px 12px; } .area-title { font-size: 15px; } .search { flex-direction: column; align-items: stretch; } .search input { flex: none; } .topic { padding: 16px; } }
+  @media (max-width: 560px) { .areas { gap: 8px; } .area { padding: 12px 14px; } .area-title { font-size: 19px; } .area .small:not(.muted) { display: none; } .search { flex-direction: column; align-items: stretch; } .search input { flex: none; } .topic { padding: 16px; } }
 </style>
 </head>
-<body class="dots">
+<body>
 
 <header class="nav">
   <div class="wrap nav-in">
@@ -227,10 +229,12 @@ const TEMPLATE = `<!doctype html>
 </header>
 
 <main id="top">
-  <section class="hero">
+  <section class="section top">
     <div class="wrap">
-      <h1 class="hero-title">Change this, <em>see that.</em></h1>
-      <p class="lede">{{total}} cases of a change and what byakugan says about it, from a case-only rename to a new <code>export *</code> line or a Tailwind class in a file nobody imports. Every row links to the test that asserts it.</p>
+      <div class="section-head">
+        <h1 class="display">Change this, see <em>that.</em></h1>
+        <p class="lede">{{total}} changes and what byakugan says about each, linked to the test that checks it.</p>
+      </div>
       <div class="search">
         <input id="q" type="search" placeholder="Search: export *, lockfile, Tailwind, rename..." aria-label="Search the examples" autocomplete="off">
         <output id="count" for="q">{{total}} cases</output>

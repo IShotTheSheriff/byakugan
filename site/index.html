@@ -614,7 +614,7 @@ byakugan: <span class="kw">error:</span> Unknown command "affcted"
 
   <section class="section" id="faq">
     <div class="wrap narrow">
-      <div class="section-head reveal"><h2 class="display">Frequently asked <em>questions</em></h2></div>
+      <div class="section-head reveal"><h2 class="display">Frequently asked <em>questions.</em></h2></div>
       <div class="faq reveal">
         <details><summary>How is this different from Turborepo or Nx affected?</summary><div>They work per package or per project: a change in a package affects everything that depends on it. byakugan works per export and per file inside npm packages. It does not run or cache tasks, so the two fit together. byakugan picks the apps, the task runner runs them.</div></details>
         <details><summary>How does it relate to Knip?</summary><div>It is Knip's approach turned around. Knip walks from entry files through every import and reports what nothing uses. byakugan does the same walk and keeps the rest, the code the app uses, so it can hash it. Both run on the oxc parser and resolver.</div></details>

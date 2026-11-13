@@ -18,15 +18,14 @@
 <script src="paper.js" defer></script>
 <style>
   .scroll { overflow-x: auto; }
-  .hero { padding-bottom: 0; }
-  .hero-title { font-size: clamp(40px, 6vw, 72px); }
+  .top { padding-top: 72px; }
+  .top .section-head { margin-bottom: 0; }
   .search { display: flex; gap: 12px; align-items: center; margin: 32px auto 0; max-width: 560px; }
   .search input { flex: 1; min-width: 0; height: 46px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--card); box-shadow: var(--hairline), var(--lift-1); color: var(--ink); font: 500 15px/1 var(--mono); }
   .search output { font: 500 13px/1 var(--sans); color: var(--ink-3); white-space: nowrap; }
   .areas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 36px; text-align: left; }
-  .area { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border-radius: 12px; background: var(--card); box-shadow: var(--hairline), var(--lift-1); color: var(--ink); text-decoration: none; transition: transform .15s; }
-  .area:hover { transform: translateY(-2px); }
-  .area-title { font: 480 17px/1.25 var(--serif); }
+  .area { gap: 4px; padding: 16px 18px; text-decoration: none; color: var(--ink); }
+  .area-title { font: 360 24px/1.1 var(--serif); font-style: italic; letter-spacing: -0.02em; }
   .reading { margin-top: 24px; text-align: left; }
   .reading p + p { margin-top: 10px; }
   .area-section { padding-top: 96px; }
@@ -48,10 +47,10 @@
   [hidden] { display: none !important; }
   @media (max-width: 900px) { .nav-item { padding: 0 9px; } }
   @media (max-width: 860px) { .areas { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 560px) { .areas { gap: 8px; } .area { padding: 10px 12px; } .area-title { font-size: 15px; } .search { flex-direction: column; align-items: stretch; } .search input { flex: none; } .topic { padding: 16px; } }
+  @media (max-width: 560px) { .areas { gap: 8px; } .area { padding: 12px 14px; } .area-title { font-size: 19px; } .area .small:not(.muted) { display: none; } .search { flex-direction: column; align-items: stretch; } .search input { flex: none; } .topic { padding: 16px; } }
 </style>
 </head>
-<body class="dots">
+<body>
 
 <header class="nav">
   <div class="wrap nav-in">
@@ -65,21 +64,23 @@
 </header>
 
 <main id="top">
-  <section class="hero">
+  <section class="section top">
     <div class="wrap">
-      <h1 class="hero-title">Change this, <em>see that.</em></h1>
-      <p class="lede">849 cases of a change and what byakugan says about it, from a case-only rename to a new <code>export *</code> line or a Tailwind class in a file nobody imports. Every row links to the test that asserts it.</p>
+      <div class="section-head">
+        <h1 class="display">Change this, see <em>that.</em></h1>
+        <p class="lede">849 changes and what byakugan says about each, linked to the test that checks it.</p>
+      </div>
       <div class="search">
         <input id="q" type="search" placeholder="Search: export *, lockfile, Tailwind, rename..." aria-label="Search the examples" autocomplete="off">
         <output id="count" for="q">849 cases</output>
       </div>
       <nav class="areas" aria-label="Sections">
-<a class="area" href="#code"><span class="area-title">Exports, barrels and code</span><span class="muted small">244 cases</span></a>
-<a class="area" href="#packages"><span class="area-title">npm packages, lockfiles and resolution</span><span class="muted small">179 cases</span></a>
-<a class="area" href="#styles"><span class="area-title">CSS, Sass and Tailwind</span><span class="muted small">143 cases</span></a>
-<a class="area" href="#files"><span class="area-title">Files, renames, deletions and links</span><span class="muted small">121 cases</span></a>
-<a class="area" href="#frameworks"><span class="area-title">Frameworks and workspaces</span><span class="muted small">107 cases</span></a>
-<a class="area" href="#git-mode"><span class="area-title">Git mode, manifests and --each</span><span class="muted small">55 cases</span></a>
+<a class="tile rose area" href="#code"><span class="area-title">Code</span><span class="small">Exports, barrels and code</span><span class="muted small">244 cases</span></a>
+<a class="tile lilac area" href="#packages"><span class="area-title">Packages</span><span class="small">npm packages, lockfiles and resolution</span><span class="muted small">179 cases</span></a>
+<a class="tile sage area" href="#styles"><span class="area-title">Styles</span><span class="small">CSS, Sass and Tailwind</span><span class="muted small">143 cases</span></a>
+<a class="tile sky area" href="#files"><span class="area-title">Files</span><span class="small">Files, renames, deletions and links</span><span class="muted small">121 cases</span></a>
+<a class="tile sand area" href="#frameworks"><span class="area-title">Frameworks</span><span class="small">Frameworks and workspaces</span><span class="muted small">107 cases</span></a>
+<a class="tile mint area" href="#git-mode"><span class="area-title">Git mode</span><span class="small">Git mode, manifests and --each</span><span class="muted small">55 cases</span></a>
       </nav>
       <div class="panel reading">
         <span class="eyebrow">Reading a row</span>
@@ -91,7 +92,7 @@
 
 <section class="section area-section" id="code">
 <div class="wrap">
-<div class="section-head"><span class="eyebrow">244 cases</span><h2 class="display">Exports, barrels and code</h2></div>
+<div class="section-head"><span class="eyebrow">244 cases</span><h2 class="display">Exports, barrels and <em>code.</em></h2></div>
 <div class="prose intro">
 <p>This page covers edits inside project source files. It shows which exports, imports, top-level statements and comments count, and which do not.</p>
 <p>Every row runs in the default <code>behavior</code> mode. Most rows commit a small app with <code>src/main.ts</code> as the entry, edit the working tree and run git mode against <code>main</code>. A row that names a reason shows the key the test asserts.</p>
@@ -715,7 +716,7 @@ export function add(a: number, b: number) {
 </section>
 <section class="section area-section" id="packages">
 <div class="wrap">
-<div class="section-head"><span class="eyebrow">179 cases</span><h2 class="display">npm packages, lockfiles and resolution</h2></div>
+<div class="section-head"><span class="eyebrow">179 cases</span><h2 class="display">Packages and <em>lockfiles.</em></h2></div>
 <div class="prose intro">
 <p>This page covers code that lives outside the project's own files, and how byakugan resolves an import to a file. It includes npm packages, lockfiles, patches, workspace packages, tsconfig paths and imports that do not resolve.</p>
 </div>
@@ -1146,7 +1147,7 @@ export const x = 1;
 </section>
 <section class="section area-section" id="styles">
 <div class="wrap">
-<div class="section-head"><span class="eyebrow">143 cases</span><h2 class="display">CSS, Sass and Tailwind</h2></div>
+<div class="section-head"><span class="eyebrow">143 cases</span><h2 class="display">CSS, Sass and <em>Tailwind.</em></h2></div>
 <div class="prose intro">
 <p>This page covers stylesheets. It shows which CSS, Sass, Less and Tailwind edits make an app affected, and which ones byakugan ignores.</p>
 <p>Most projects below start from this file set unless a snippet says otherwise:</p>
@@ -1605,7 +1606,7 @@ registerPaint('border', class { paint() { return width; } });</pre>
 </section>
 <section class="section area-section" id="files">
 <div class="wrap">
-<div class="section-head"><span class="eyebrow">121 cases</span><h2 class="display">Files, renames, deletions and links</h2></div>
+<div class="section-head"><span class="eyebrow">121 cases</span><h2 class="display">Renames, deletions and <em>links.</em></h2></div>
 <div class="prose intro">
 <p>This page covers files the app reads by path instead of a plain import, and changes to the file tree itself: renames, deletions, ignored files, symlinks and submodules. &quot;Git mode&quot; means <code>byakugan affected --base main</code>. Rows without it compare fingerprints.</p>
 </div>
@@ -1926,7 +1927,7 @@ notes/readme.md</pre>
 </section>
 <section class="section area-section" id="frameworks">
 <div class="wrap">
-<div class="section-head"><span class="eyebrow">107 cases</span><h2 class="display">Frameworks and workspaces</h2></div>
+<div class="section-head"><span class="eyebrow">107 cases</span><h2 class="display">Frameworks and <em>workspaces.</em></h2></div>
 <div class="prose intro">
 <p>This page shows how byakugan finds entries and hidden inputs in each framework it detects, and how it picks the apps of a workspace. Every row comes from a test. <a href="https://github.com/IShotTheSheriff/byakugan/blob/main/docs/frameworks.md">frameworks.md</a> has the short version with results from real projects.</p>
 </div>
@@ -2363,7 +2364,7 @@ apps/docs/src/index.ts         app that uses nothing from @acme/ui</pre>
 </section>
 <section class="section area-section" id="git-mode">
 <div class="wrap">
-<div class="section-head"><span class="eyebrow">55 cases</span><h2 class="display">Git mode, manifests and --each</h2></div>
+<div class="section-head"><span class="eyebrow">55 cases</span><h2 class="display">Git mode and <em>manifests.</em></h2></div>
 <div class="prose intro">
 <p>This page shows how <code>byakugan affected</code> picks the two sides it compares, how a saved manifest stands in for the base side, and which files <code>--each</code> selects. Other pages cover what a given code edit means.</p>
 </div>

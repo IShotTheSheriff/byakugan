@@ -100,6 +100,7 @@ a { color: inherit; }
 .wrap { width: 100%; max-width: var(--wrap); margin: 0 auto; padding: 0 var(--gutter); }
 .narrow { max-width: 720px; margin-left: auto; margin-right: auto; }
 .section { padding: 112px 0 0; }
+main:last-child, main:has(+ script:last-child) { padding-bottom: 112px; } /* breathing room when there is no footer */
 .section-head { text-align: center; margin: 0 auto 48px; max-width: 760px; }
 .grid { display: grid; gap: 20px; }
 .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
