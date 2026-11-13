@@ -81,7 +81,11 @@ docs/limits.md its limits; read both first.
   Formatters in report.ts build lines from parts, and `lines()` escapes each
   part before it paints it.
 - `docs/`: user documentation. `docs/adopting.md` ships in the npm package,
-  and `byakugan guide` prints it.
+  and `byakugan guide` prints it. `docs/examples/` lists cases of a change
+  and its result, each row linked to the test that asserts it.
+- `site/`: the website, static files on Vercel with no build step.
+  `site/examples.html` is generated from `docs/examples/*.md` by
+  `scripts/site-examples.ts` (`npm run site`). Do not edit it by hand.
 - `src/fs.ts`: `readRegular` and `readText`, which read regular files only.
   `src/glob.ts`: `globMatcher` and `safeGlob`, linear-time matching and a
   crawler that stays inside the git root. A link into a directory the crawl
@@ -141,7 +145,8 @@ and compare fingerprints or `affected` results. `test/tailwind.test.ts` links
 the real `tailwindcss` (v4) and `tailwindcss3` devDependencies into its
 fixtures. Every precision claim has a
 paired test that fails if the tool gets too coarse and one that fails if it
-gets too lax. Keep both when adding a case.
+gets too lax. Keep both when adding a case, and add the pair as rows to
+the matching page in `docs/examples/`, then run `npm run site`.
 
 `test/differential.test.ts` applies seeded random edits and fails when the
 fingerprint moves while git mode says unaffected. Run more seeds with

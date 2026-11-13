@@ -48,6 +48,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test 'test/**/*.test.ts'",
     "byakugan": "node src/cli.ts",
+    "site": "node scripts/site-examples.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "engines": {

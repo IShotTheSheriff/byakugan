@@ -36,6 +36,7 @@
   .sum { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; text-align: center; }
   .sum b { display: block; font: 340 44px/1 var(--serif); letter-spacing: -0.03em; }
   .sum span { font-size: 14px; color: var(--ink-2); }
+  @media (max-width: 900px) { .nav-item { padding: 0 9px; } }
   @media (max-width: 720px) { .sum { grid-template-columns: 1fr; } .panel { padding: 18px; } }
 </style>
 </head>
@@ -46,7 +47,7 @@
     <a class="wordmark" href="#top">byakugan</a>
     <nav class="nav-pill" aria-label="Main">
       <i class="nav-hi" aria-hidden="true"></i>
-      <a class="nav-item" href="#why">Why</a><a class="nav-item" href="#how">How it works</a><a class="nav-item" href="#start">Start</a><a class="nav-item" href="#config">Config</a><a class="nav-item" href="#recipes">Recipes</a><a class="nav-item" href="#faq">FAQ</a>
+      <a class="nav-item" href="#why">Why</a><a class="nav-item" href="#how">How it works</a><a class="nav-item" href="#start">Start</a><a class="nav-item" href="#config">Config</a><a class="nav-item" href="#recipes">Recipes</a><a class="nav-item" href="examples.html">Examples</a><a class="nav-item" href="#faq">FAQ</a>
     </nav>
     <a class="key key-sm" href="https://github.com/IShotTheSheriff/byakugan">GitHub <svg class="arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
   </div>
@@ -304,6 +305,7 @@ changes nothing uses
           </tbody>
         </table>
       </div>
+      <p class="center reveal" style="margin-top:24px"><a class="link" href="examples.html">See every case from the test suite, each linked to its test</a></p>
       <div class="callout reveal" style="margin-top:24px"><p class="h4">Speed</p><p>On a Next.js app with 58 npm packages a run takes 0.7 s. Eight apps over one 6,000-module shared package take about 8 s with <code>--workspace</code>, because a shared file is parsed once.</p></div>
     </div>
   </section>

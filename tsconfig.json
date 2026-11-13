@@ -13,6 +13,6 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["src", "test"],
+  "include": ["src", "test", "scripts"],
   "exclude": ["test/fixtures"]
 }
