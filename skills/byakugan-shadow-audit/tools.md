@@ -56,6 +56,6 @@ install, which runs anyway: subtract the steps before the first build step
 
 Without Nx or Turborepo, a shadow workflow builds and tests every app on
 every run, so every outcome is **ran** and step 5 makes every unaffected
-verdict a suspect. Step 6 then has only test results, `byakugan compare` and
-reading the change to go on. Say in the report that no build tool narrowed
+verdict a disagreement for step 6 to judge. Every saving is then measured
+against running everything. Say in the report that no build tool narrowed
 the comparison.
