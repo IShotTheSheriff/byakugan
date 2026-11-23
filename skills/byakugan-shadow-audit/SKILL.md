@@ -98,7 +98,10 @@ The docs named below ship with the package, in
       knows (build ID, secrets, checkout path, caches, traces). Read the
       files it names. Code that the diff explains points to a miss; chunk
       names, hashes or ordering with no link to the diff are noise, and say
-      nothing about byakugan.
+      nothing about byakugan. Next.js gives server actions new IDs on every
+      build unless `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` is fixed, so
+      differences that are only `$ACTION_ID_…` or action hashes are noise
+      too; tell the user to fix the key in the shadow builds.
    4. Decide **saving** or **miss** yourself, as the judgement of this
       skill, with the chain of reasoning in two or three sentences and a
       confidence: high when you followed every changed hunk to a dead end or
@@ -107,7 +110,9 @@ The docs named below ship with the package, in
       explain away keeps the case a miss.
    5. For a low-confidence call, offer to settle it by building both sides
       and running `npx byakugan compare <base output> <head output>`. First
-      build the merge base twice and compare those two: if they differ, the
+      build the merge base twice, with the same fixed
+      `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` for every build of a Next.js app,
+      and compare those two: if they differ, the
       build is not reproducible and `compare` cannot settle anything here.
       Ask before running builds. Without them the case is **unresolved**.
 
