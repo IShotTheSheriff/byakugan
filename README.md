@@ -182,6 +182,10 @@ and [docs/ci.md](docs/ci.md) has the GitHub Actions workflows.
 byakugan is built to be set up and read by an agent.
 
 - `byakugan guide` prints the setup steps from the installed package.
+- The `byakugan-shadow-audit` skill grades shadow-mode verdicts against what
+  CI really built and tested, and lists every miss. It ships in
+  `node_modules/byakugan-cli/skills/`; copy the folder into your agent's
+  skills directory, such as `.claude/skills/`.
 - `byakugan doctor --workspace --json` lists every app and every finding with
   a `severity`, a `kind` and a `fix`.
 - `byakugan <command> --help` lists the JSON shape and the exit codes.
