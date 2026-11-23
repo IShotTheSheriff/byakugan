@@ -1,7 +1,7 @@
 # What the build tool did
 
 Step 4 of the audit needs, for each app in each run, one outcome: **ran**,
-**cached** or **skipped**, plus whether its tasks passed. Read it from the
+**cached** or **skipped**, whether its tasks passed, and how long they took. Read it from the
 CI log first. Recompute it locally only when the log does not say.
 
 Match apps by directory. byakugan names apps by path (`apps/web`); Nx and
@@ -20,13 +20,16 @@ The log prints one line per task:
 - no line for the package: skipped by `--filter`
 
 With `--summarize`, `.turbo/runs/<id>.json` lists `tasks[].cache.status`
-(`HIT` or `MISS`). Use it if the workflow uploads it as an artifact.
+(`HIT` or `MISS`) and `tasks[].execution` with `startTime` and `endTime`
+in milliseconds. Use it if the workflow uploads it as an artifact.
 
 To recompute what a filter would select:
 `npx turbo run build --filter='...[<merge base>]' --dry=json`, read
 `packages`.
 
 ## Nx
+
+Nx Cloud shows per-task durations for the run; the log alone does not.
 
 Map: `npx nx show project <name> --json`, field `root`.
 
@@ -39,6 +42,15 @@ The log prints one line per task:
 
 To recompute the affected set:
 `npx nx show projects --affected --base=<merge base> --head=<sha> -t build --json`.
+
+## Durations
+
+Without per-task times, take job times:
+`gh run view <id> --json jobs --jq '.jobs[] | {name, startedAt, completedAt}'`.
+A job that builds one app belongs to that app. Split a job that builds
+several apps evenly between them, and leave out setup such as checkout and
+install, which runs anyway: subtract the steps before the first build step
+(`gh run view <id> --json jobs --jq '.jobs[].steps'`).
 
 ## A plain workflow
 
