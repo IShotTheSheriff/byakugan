@@ -87,14 +87,19 @@ The docs named below ship with the package, in
       generated file or build-time data source changed. docs/limits.md, "These
       can miss a change", lists the kinds byakugan cannot see. Check each one
       against the diff.
-   3. Decide **saving** or **miss**, with the chain of reasoning in two or
-      three sentences and a confidence: high when you followed every changed
-      hunk to a dead end or into the app, low when a hunk leaves the code you
-      can read (dynamic paths, plugins, CI scripts).
-   4. Hard evidence overrides your reading. A failing `byakugan compare` in
-      the run, a test that fails on the PR head and passes on its merge base,
-      or a failure on the main branch after the merge that the PR caused is a
-      miss.
+   3. Weigh what CI already shows. Three signals point to a miss: a failing
+      `byakugan compare` (the build output differs from the base), a test
+      that fails on the PR head and passes on its merge base (the PR changed
+      what the app does), and a failure on the main branch after the merge
+      that traces back to the PR. They should be rare. Each one needs an
+      explanation: find the hunk that caused it. A test that also fails on
+      the base, or fails and passes on reruns, says nothing about byakugan.
+   4. Decide **saving** or **miss** yourself, as the judgement of this
+      skill, with the chain of reasoning in two or three sentences and a
+      confidence: high when you followed every changed hunk to a dead end or
+      into the app, low when a hunk leaves the code you can read (dynamic
+      paths, plugins, CI scripts). A signal from step 3 that you cannot
+      explain away keeps the case a miss.
    5. For a low-confidence call, offer to settle it by building both sides:
       check out the merge base and the head in two git worktrees, build the
       app in both and run `npx byakugan compare <base output> <head output>`.
@@ -126,15 +131,27 @@ The docs named below ship with the package, in
 
 ## Report
 
-Write it in this order:
+Write the report in English, in this order:
 
 1. Range, repository, the number of PRs, runs and samples.
-2. **Misses**, each with: PR link, commit, app, what changed, the reasoning
-   or evidence, the cause and the fix. If there are none, say that plainly.
+2. **Misses**, one red card each, opening with the verdict and the doubt in
+   one sentence, then the reason:
+
+   > 🟥 **PR #412, `apps/web`.** byakugan marked `web` as unaffected, which
+   > looks like a mistake. The PR edits `apps/web/messages/pl.json`, and
+   > `apps/web/i18n.ts` loads it with ``import(`@/messages/${locale}.json`)``,
+   > a computed import behind an alias that byakugan cannot follow. The
+   > Polish pages would ship the old strings. Confidence: high. Fix: add
+   > `messages/**` to `inputs` in byakugan.json.
+
+   Then the commit, the evidence from step 3 if any, and whether the cause is
+   a setting or a byakugan bug. If there are no misses, say that plainly.
 3. **CI time**: minutes saved, minutes of extras, the net, the monthly
    projection, and the method.
-4. **Savings**: count, and three or four typical cases with their one-line
-   reasoning, so the reader can check the judgement.
+4. **Savings**: count, and three or four typical cases in the same voice
+   ("byakugan marked `docs` as unaffected, which looks right: the PR only
+   changes `Modal`, and `docs` imports `Button` alone"), so the reader can
+   check the judgement.
 5. **Unresolved** cases and what would settle each.
 6. **Extras**: count, the top groups with their cause and fix.
 7. Counts per grade.
