@@ -230,6 +230,9 @@ Build every pull request, and when byakugan says unaffected, also build the
 merge base and compare the two:
 
 ```yaml
+# Next.js gives server actions new IDs on every build unless this key is fixed.
+# Both builds below must use the same one. A key made in the job is enough.
+- run: echo "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
 - id: web
   env:
     BASE_REF: ${{ github.base_ref }}
@@ -245,7 +248,12 @@ merge base and compare the two:
 ```
 
 A failing `compare` means byakugan missed an input. Its output names the
-files that differ.
+files that differ. Before you trust that, check that your build is
+reproducible: build the merge base twice and compare those two. If they
+differ, something else in the build changes per run. In a Next.js app it is
+usually the server action key: without a fixed
+`NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` the only differences are `$ACTION_ID_…`
+strings and action hashes.
 
 See [examples/github-actions.yml](../examples/github-actions.yml) for a full
 workflow.

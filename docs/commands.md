@@ -220,8 +220,14 @@ unaffected, a build of the change should match a build of the base. The
 default `behavior` mode allows the builds to differ in code nothing runs. On [bobr](https://github.com/IShotTheSheriff/bobr), a Next.js 16
 monorepo built with Turbopack, two builds of one commit matched. A Prettier run
 over 14 used files with other settings matched too, apart from source maps. A
-change to a function the app uses gave 8 different files. Webpack builds are
-untested.
+change to a function the app uses gave 8 different files.
+
+Next.js gives every server action a new ID on each build unless
+`NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` is set to the same value for both
+builds. `compare` does not strip those IDs. On Next.js 16.4 with one server
+action, two builds of one commit differed in 9 files with Turbopack and 7
+with webpack, all of them action IDs and hashes. With the key fixed, both
+bundlers gave builds that match.
 
 ## `byakugan why <target>`
 

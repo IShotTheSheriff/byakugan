@@ -163,8 +163,17 @@ unaffected, build the base commit too and run:
 npx --no-install byakugan compare ../base/apps/web/.next apps/web/.next
 ```
 
-It exits with 1 and names the files that differ. [ci.md](ci.md) has both as
-workflows. Two weeks of pull requests without a miss is a reasonable bar.
+It exits with 1 and names the files that differ. First build the base twice
+and compare those two builds: if they differ, your build is not reproducible
+and `compare` cannot judge byakugan yet. For a Next.js app with server
+actions, set `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` to one value for every
+build in the job, or each build gets new action IDs. [ci.md](ci.md) has both
+as workflows. Two weeks of pull requests without a miss is a reasonable bar.
+
+The `byakugan-shadow-audit` skill in `node_modules/byakugan-cli/skills/`
+reads those runs back: it sets each verdict beside what Nx, Turborepo or the
+workflow really ran, judges each disagreement from the diff, lists the misses
+and adds up the CI time byakugan would save.
 
 ## Step 7: skip
 
@@ -316,9 +325,10 @@ configuration: `webpack.resolve.alias`, `turbopack.resolveAlias`, custom
 loaders. Declare aliases in tsconfig `paths`. A loader or plugin that
 `next.config` names in a string counts by its installed version.
 
-`compare` was checked against Turbopack builds on Next.js 16. Webpack builds
-are untested, so run the shadow mode of step 6 before you reuse webpack build
-output.
+`compare` was checked against Turbopack and webpack builds on Next.js 16.
+Both match between two builds of one commit once
+`NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` is fixed. Without it, server actions get
+new IDs on every build.
 
 ### Very large monorepos
 

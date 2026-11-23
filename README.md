@@ -70,6 +70,28 @@ The command is `byakugan`. It needs Node.js 22.12 or newer, and CI runs on 22,
 that skips work: seven steps, each with its command and what the result means.
 `byakugan guide` prints it.
 
+## Check your setup
+
+A verdict is only as good as the setup behind it. Before CI acts on one,
+check these five things:
+
+1. `byakugan doctor --workspace` exits with 0, and every app you deploy is in
+   its list.
+2. Three edits per app give the answers you expect: a file nothing imports and
+   an unused export say unaffected, the body of a function a page renders says
+   affected ([adopting.md, step 4](docs/adopting.md#step-4-check-a-few-verdicts-by-hand)).
+3. CI runs byakugan after the install step, checks out with `fetch-depth: 0`,
+   and every condition reads `affected != 'false'`, so a failed run means
+   "run everything".
+4. Two builds of one commit pass `byakugan compare`. In a Next.js app with
+   server actions this needs one fixed `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY`
+   for both builds; without it every build gets new action IDs.
+5. Shadow mode ran for two weeks of pull requests without a miss. The
+   `byakugan-shadow-audit` skill checks this from your CI history.
+
+The `byakugan-setup` skill walks a coding agent through all five. See
+[For coding agents](#for-coding-agents).
+
 ## What you can skip with it
 
 | You want to skip | Command |
@@ -182,10 +204,17 @@ and [docs/ci.md](docs/ci.md) has the GitHub Actions workflows.
 byakugan is built to be set up and read by an agent.
 
 - `byakugan guide` prints the setup steps from the installed package.
-- The `byakugan-shadow-audit` skill grades shadow-mode verdicts against what
-  CI really built and tested, and lists every miss. It ships in
-  `node_modules/byakugan-cli/skills/`; copy the folder into your agent's
-  skills directory, such as `.claude/skills/`.
+- Two skills ship in `node_modules/byakugan-cli/skills/`. Copy their folders
+  into your agent's skills directory, such as `.claude/skills/`:
+  - `byakugan-setup` installs byakugan, fixes what `doctor` finds, checks
+    verdicts by hand and writes a shadow-mode CI job.
+  - `byakugan-shadow-audit` grades shadow-mode verdicts against what CI
+    really built and tested, lists every miss and adds up the CI time
+    byakugan would save.
+
+  ```sh
+  cp -r node_modules/byakugan-cli/skills/byakugan-* .claude/skills/
+  ```
 - `byakugan doctor --workspace --json` lists every app and every finding with
   a `severity`, a `kind` and a `fix`.
 - `byakugan <command> --help` lists the JSON shape and the exit codes.
