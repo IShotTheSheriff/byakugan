@@ -87,22 +87,28 @@ The docs named below ship with the package, in
       generated file or build-time data source changed. docs/limits.md, "These
       can miss a change", lists the kinds byakugan cannot see. Check each one
       against the diff.
-   3. Weigh what CI already shows. Three signals point to a miss: a failing
-      `byakugan compare` (the build output differs from the base), a test
-      that fails on the PR head and passes on its merge base (the PR changed
-      what the app does), and a failure on the main branch after the merge
-      that traces back to the PR. They should be rare. Each one needs an
+   3. Weigh what CI already shows. Two signals point to a miss: a test that
+      fails on the PR head and passes on its merge base (the PR changed what
+      the app does), and a failure on the main branch after the merge that
+      traces back to the PR. They should be rare. Each one needs an
       explanation: find the hunk that caused it. A test that also fails on
       the base, or fails and passes on reruns, says nothing about byakugan.
+      A failing `byakugan compare` is a clue, not a verdict: builds are not
+      deterministic everywhere, and `compare` only removes the noise it
+      knows (build ID, secrets, checkout path, caches, traces). Read the
+      files it names. Code that the diff explains points to a miss; chunk
+      names, hashes or ordering with no link to the diff are noise, and say
+      nothing about byakugan.
    4. Decide **saving** or **miss** yourself, as the judgement of this
       skill, with the chain of reasoning in two or three sentences and a
       confidence: high when you followed every changed hunk to a dead end or
       into the app, low when a hunk leaves the code you can read (dynamic
       paths, plugins, CI scripts). A signal from step 3 that you cannot
       explain away keeps the case a miss.
-   5. For a low-confidence call, offer to settle it by building both sides:
-      check out the merge base and the head in two git worktrees, build the
-      app in both and run `npx byakugan compare <base output> <head output>`.
+   5. For a low-confidence call, offer to settle it by building both sides
+      and running `npx byakugan compare <base output> <head output>`. First
+      build the merge base twice and compare those two: if they differ, the
+      build is not reproducible and `compare` cannot settle anything here.
       Ask before running builds. Without them the case is **unresolved**.
 
    Done when every disagreement is a saving, a miss or unresolved, each with
